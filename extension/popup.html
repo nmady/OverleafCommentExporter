@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Overleaf Export</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      body {
+        margin: 0;
+        width: 300px;
+        font-family: "Segoe UI", "Noto Sans", sans-serif;
+        background: linear-gradient(160deg, #f7fafc 0%, #eef6ff 100%);
+        color: #1f2d3d;
+      }
+
+      .wrap {
+        padding: 14px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      p {
+        margin: 0 0 10px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: #39526d;
+      }
+
+      button {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: #127c56;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.7;
+        cursor: default;
+      }
+
+      .status {
+        min-height: 18px;
+        margin-top: 10px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Overleaf Comment Exporter</h1>
+      <p>Open the Review panel in Overleaf, then export comments to CSV.</p>
+      <button id="export-btn">Export Comments</button>
+      <div id="status" class="status"></div>
+    </div>
+    <script src="dist/popup.js"></script>
+  </body>
+</html>

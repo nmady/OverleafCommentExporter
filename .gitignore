@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Node / extension build artifacts
+node_modules/
+extension/node_modules/
+extension/dist/
+
+# Logs and editor artifacts
+*.log
+.vscode/*.log
+
+# Local output data files (generated)
+overleaf-comments-*.csv
+untitled_comments.csv
+untitled_comments.xlsx
+
+# Local HTML captures/samples (keep extension HTML tracked)
+untitled.html
+overleafsample*.html
+*.sample.html
+samples/

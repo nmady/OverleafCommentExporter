@@ -1,0 +1,15 @@
+{
+  "name": "overleaf-comment-exporter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Firefox extension to export Overleaf review comments as CSV",
+  "scripts": {
+    "build": "esbuild src/content.ts --bundle --format=iife --outfile=dist/content.js && esbuild src/popup.ts --bundle --format=iife --outfile=dist/popup.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.280",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.3"
+  }
+}

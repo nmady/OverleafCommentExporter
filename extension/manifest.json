@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Overleaf Comment Exporter",
+  "version": "0.1.0",
+  "description": "Export Overleaf review comments as CSV.",
+  "permissions": ["activeTab"],
+  "host_permissions": ["https://www.overleaf.com/*"],
+  "action": {
+    "default_title": "Overleaf Comment Exporter",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.overleaf.com/*"],
+      "js": ["dist/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "overleaf-comment-exporter@local",
+      "strict_min_version": "109.0"
+    }
+  }
+}
