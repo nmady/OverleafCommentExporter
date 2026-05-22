@@ -3,91 +3,70 @@ import { CommentRow } from "./types";
 type EditorLines = {
   lines: Array<[number, string]>;
   fullText: string;
+  source: "codemirror-state" | "dom-scroll-harvest" | "dom-visible-lines";
+  lineCoverage: number;
 };
 
 type DocLike = {
   toString: () => string;
 };
 
-type SelectionLike = {
-  from: number;
-  to: number;
+type DocLineLike = {
+  number: number;
 };
 
-function hasNonEmptySelection(selection: SelectionLike | null): selection is SelectionLike {
-  return !!selection && selection.to > selection.from;
-}
+type EditorStateLike = {
+  doc: DocLike & {
+    lineAt?: (pos: number) => DocLineLike;
+  };
+};
 
-function selectionsEqual(a: SelectionLike | null, b: SelectionLike | null): boolean {
-  if (!a && !b) {
-    return true;
-  }
-  if (!a || !b) {
-    return false;
-  }
-  return a.from === b.from && a.to === b.to;
-}
+type EditorViewLike = {
+  state: EditorStateLike;
+  dispatch: (spec: unknown) => void;
+  focus?: () => void;
+};
 
-function isSelectionRelevantToPos(selection: SelectionLike | null, dataPos: number): boolean {
-  if (!hasNonEmptySelection(selection)) {
-    return false;
-  }
-  if (dataPos < 0) {
-    return true;
-  }
-  if (selection.from <= dataPos && dataPos <= selection.to) {
-    return true;
-  }
-  return Math.abs(selection.from - dataPos) <= 3;
-}
+type ScrollCheck = {
+  method: string;
+  targetLine: number;
+  visibleStart: number;
+  visibleEnd: number;
+  targetVisible: boolean;
+};
+
+type UiHighlightDetails = {
+  text: string;
+  source: string;
+  focusCommentCount: number;
+  focusAnyCount: number;
+  highlightCommentCount: number;
+  highlightAnyCount: number;
+  changeCommentCount: number;
+  changeAnyCount: number;
+};
+
+type HighlightCandidate = {
+  text: string;
+  fragments: string[];
+};
+
+type ExactCandidateMatch = {
+  text: string;
+  fragmentCount: number;
+  spanLength: number;
+};
+
+type HighlightConfidence = "high" | "medium" | "low" | "none";
+
+type HighlightResolution = {
+  text: string;
+  source: string;
+  confidence: HighlightConfidence;
+};
 
 function normalizeSpaces(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function getWordAtPos(fullText: string, pos: number): string {
-  if (!fullText || pos < 0 || pos >= fullText.length) {
-    return "";
-  }
-
-  let start = pos;
-  let end = pos;
-  while (start > 0 && /[^\s]/.test(fullText[start - 1])) {
-    start -= 1;
-  }
-  while (end < fullText.length && /[^\s]/.test(fullText[end])) {
-    end += 1;
-  }
-
-  return normalizeSpaces(fullText.slice(start, end));
-}
-
-function getClosestOccurrenceDistance(fullText: string, text: string, dataPos: number): number {
-  if (dataPos < 0) {
-    return 0;
-  }
-
-  let closestDistance = Number.POSITIVE_INFINITY;
-  let fromIndex = 0;
-  while (fromIndex < fullText.length) {
-    const idx = fullText.indexOf(text, fromIndex);
-    if (idx < 0) {
-      break;
-    }
-
-    const end = idx + text.length;
-    const distance = dataPos < idx ? idx - dataPos : (dataPos > end ? dataPos - end : 0);
-    if (distance < closestDistance) {
-      closestDistance = distance;
-      if (closestDistance === 0) {
-        break;
-      }
-    }
-
-    fromIndex = idx + 1;
-  }
-
-  return closestDistance;
 }
 
 type ExtractCommentsRequest = {
@@ -97,7 +76,19 @@ type ExtractCommentsRequest = {
 type ExtractCommentsResponse = {
   ok: boolean;
   rows?: CommentRow[];
+  editorFullText?: string;
+  editorTextSource?: string;
+  editorTextLen?: number;
+  errors?: string[];
   error?: string;
+};
+
+type ExtractCommentsResult = {
+  rows: CommentRow[];
+  editorFullText: string;
+  editorTextSource: string;
+  editorTextLen: number;
+  errors: string[];
 };
 
 function sleep(ms: number): Promise<void> {
@@ -162,6 +153,23 @@ function extractThreadId(entryEl: Element): string {
   return btn.id.replace("review-panel-comment-options-btn-", "");
 }
 
+function getEntryDataPos(entryEl: Element): number {
+  const direct = entryEl.getAttribute("data-pos");
+  const directNum = direct == null ? NaN : Number.parseInt(direct, 10);
+  if (Number.isFinite(directNum)) {
+    return directNum;
+  }
+
+  const nearest = entryEl.closest(".review-panel-entry[data-pos]") as HTMLElement | null;
+  const nearestRaw = nearest?.getAttribute("data-pos");
+  const nearestNum = nearestRaw == null ? NaN : Number.parseInt(nearestRaw, 10);
+  if (Number.isFinite(nearestNum)) {
+    return nearestNum;
+  }
+
+  return -1;
+}
+
 function buildLinesFromText(fullText: string): Array<[number, string]> {
   const normalized = fullText.replace(/\r\n?/g, "\n");
   const parts = normalized.split("\n");
@@ -202,6 +210,122 @@ function findDocLike(obj: unknown): DocLike | null {
   return null;
 }
 
+function getDocFromPath(root: unknown, path: string[]): DocLike | null {
+  if (!root || typeof root !== "object") {
+    return null;
+  }
+
+  let current: unknown = root;
+  for (const key of path) {
+    if (!current || typeof current !== "object") {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+
+  if (current && typeof current === "object") {
+    const asObj = current as Record<string, unknown>;
+    if (typeof asObj.toString === "function") {
+      return asObj as unknown as DocLike;
+    }
+  }
+
+  return null;
+}
+
+function findDocLikeWithKnownPaths(obj: unknown): DocLike | null {
+  const direct = findDocLike(obj);
+  if (direct) {
+    return direct;
+  }
+
+  const paths: string[][] = [
+    ["doc"],
+    ["state", "doc"],
+    ["view", "state", "doc"],
+    ["view", "view", "state", "doc"],
+    ["cmView", "state", "doc"],
+    ["cmView", "view", "state", "doc"],
+    ["cmView", "view", "view", "state", "doc"],
+    ["rootView", "state", "doc"],
+    ["rootView", "view", "state", "doc"],
+    ["editorView", "state", "doc"],
+    ["_view", "state", "doc"]
+  ];
+
+  for (const path of paths) {
+    const doc = getDocFromPath(obj, path);
+    if (doc) {
+      return doc;
+    }
+  }
+
+  return null;
+}
+
+function findEditorViewLike(obj: unknown): EditorViewLike | null {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+
+  const paths: string[][] = [
+    [],
+    ["view"],
+    ["cmView"],
+    ["cmView", "view"],
+    ["cmView", "view", "view"],
+    ["editorView"],
+    ["rootView"],
+    ["_view"]
+  ];
+
+  for (const path of paths) {
+    let current: unknown = obj;
+    for (const key of path) {
+      if (!current || typeof current !== "object") {
+        current = null;
+        break;
+      }
+      current = (current as Record<string, unknown>)[key];
+    }
+
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+
+    const maybeView = current as Record<string, unknown>;
+    const state = maybeView.state as Record<string, unknown> | undefined;
+    const doc = state?.doc as Record<string, unknown> | undefined;
+    if (typeof maybeView.dispatch === "function" && doc && typeof doc.toString === "function") {
+      return current as EditorViewLike;
+    }
+  }
+
+  return null;
+}
+
+function getEditorViewLike(): EditorViewLike | null {
+  const editorEl = document.querySelector(".cm-editor") as (HTMLElement & Record<string, unknown>) | null;
+  const contentEl = document.querySelector(".cm-content") as (HTMLElement & Record<string, unknown>) | null;
+
+  const candidates: unknown[] = [];
+  if (editorEl) {
+    candidates.push(editorEl, editorEl.cmView, editorEl.view, editorEl.editorView);
+  }
+  if (contentEl) {
+    candidates.push(contentEl, contentEl.cmView, contentEl.view, contentEl.editorView);
+  }
+
+  for (const candidate of candidates) {
+    const view = findEditorViewLike(candidate);
+    if (view) {
+      return view;
+    }
+  }
+
+  return null;
+}
+
 function getEditorTextFromCodeMirrorState(): string | null {
   const editorEl = document.querySelector(".cm-editor") as (HTMLElement & Record<string, unknown>) | null;
   const contentEl = document.querySelector(".cm-content") as (HTMLElement & Record<string, unknown>) | null;
@@ -225,7 +349,7 @@ function getEditorTextFromCodeMirrorState(): string | null {
   }
 
   for (const candidate of candidates) {
-    const doc = findDocLike(candidate);
+    const doc = findDocLikeWithKnownPaths(candidate);
     if (doc) {
       return doc.toString();
     }
@@ -234,73 +358,10 @@ function getEditorTextFromCodeMirrorState(): string | null {
   return null;
 }
 
-function getEditorSelectionFromCodeMirrorState(): SelectionLike | null {
-  const editorEl = document.querySelector(".cm-editor") as (HTMLElement & Record<string, unknown>) | null;
-  const contentEl = document.querySelector(".cm-content") as (HTMLElement & Record<string, unknown>) | null;
-
-  const candidates: unknown[] = [];
-  if (editorEl) {
-    candidates.push(
-      editorEl,
-      editorEl.cmView,
-      (editorEl.cmView as Record<string, unknown> | undefined)?.view,
-      editorEl.view
-    );
-  }
-  if (contentEl) {
-    candidates.push(
-      contentEl,
-      contentEl.cmView,
-      (contentEl.cmView as Record<string, unknown> | undefined)?.view,
-      contentEl.view
-    );
-  }
-
-  for (let candIdx = 0; candIdx < candidates.length; candIdx++) {
-    const candidate = candidates[candIdx];
-    if (!candidate || typeof candidate !== "object") {
-      continue;
-    }
-
-    const state = (candidate as Record<string, unknown>).state;
-    if (!state || typeof state !== "object") {
-      continue;
-    }
-
-    const selection = (state as Record<string, unknown>).selection;
-    if (!selection || typeof selection !== "object") {
-      continue;
-    }
-
-    const main = (selection as Record<string, unknown>).main;
-    if (!main || typeof main !== "object") {
-      console.log("getEditorSelectionFromCodeMirrorState: selection.main not found, checking selection directly", { candIdx, selectionKeys: Object.keys(selection) });
-      // Some versions have selection as a range-like object directly
-      const from = (selection as Record<string, unknown>).from;
-      const to = (selection as Record<string, unknown>).to;
-      if (typeof from === "number" && typeof to === "number") {
-        console.log("getEditorSelectionFromCodeMirrorState: Found selection in selection object", { from, to });
-        return { from, to };
-      }
-      continue;
-    }
-
-    const from = (main as Record<string, unknown>).from;
-    const to = (main as Record<string, unknown>).to;
-    if (typeof from === "number" && typeof to === "number") {
-      console.log("getEditorSelectionFromCodeMirrorState: Found selection", { from, to });
-      return { from, to };
-    }
-  }
-
-  console.warn("getEditorSelectionFromCodeMirrorState: No selection found in any candidate");
-  return null;
-}
-
 function buildEditorLinesFromDom(): EditorLines {
   const cmContent = document.querySelector(".cm-content");
   if (!cmContent) {
-    return { lines: [], fullText: "" };
+    return { lines: [], fullText: "", source: "dom-visible-lines", lineCoverage: 0 };
   }
 
   const parts: string[] = [];
@@ -314,75 +375,335 @@ function buildEditorLinesFromDom(): EditorLines {
   const fullText = parts.join("\n");
   return {
     lines: buildLinesFromText(fullText),
-    fullText
+    fullText,
+    source: "dom-visible-lines",
+    lineCoverage: 0
   };
 }
 
-function buildEditorLines(): EditorLines {
+function parseLineNumber(raw: string): number | null {
+  const m = raw.trim().match(/^\d+$/);
+  if (!m) {
+    return null;
+  }
+  const n = Number.parseInt(m[0], 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function captureVisibleLinesWithNumbers(scroller: HTMLElement, acc: Map<number, string>): void {
+  const lineEls = Array.from(scroller.querySelectorAll(".cm-content .cm-line"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement);
+  const gutterEls = Array.from(scroller.querySelectorAll(".cm-lineNumbers .cm-gutterElement"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement);
+
+  const numberedGutters = gutterEls
+    .map((el) => ({
+      top: el.getBoundingClientRect().top,
+      lineNo: parseLineNumber(el.textContent ?? "")
+    }))
+    .filter((x): x is { top: number; lineNo: number } => x.lineNo != null)
+    .sort((a, b) => a.top - b.top);
+
+  if (!numberedGutters.length) {
+    return;
+  }
+
+  for (const lineEl of lineEls) {
+    const top = lineEl.getBoundingClientRect().top;
+    let best: { top: number; lineNo: number } | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+
+    for (const g of numberedGutters) {
+      const dist = Math.abs(g.top - top);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = g;
+      }
+      if (g.top > top && dist > bestDist) {
+        break;
+      }
+    }
+
+    if (!best || bestDist > 16) {
+      continue;
+    }
+
+    const text = lineEl.textContent ?? "";
+    const prev = acc.get(best.lineNo);
+    // Keep the longest seen line for each line number to avoid transient truncation.
+    if (!prev || text.length > prev.length) {
+      acc.set(best.lineNo, text);
+    }
+  }
+}
+
+async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
+  const scroller = document.querySelector(".cm-editor .cm-scroller") as HTMLElement | null;
+  if (!scroller) {
+    return buildEditorLinesFromDom();
+  }
+
+  const originalTop = scroller.scrollTop;
+  const acc = new Map<number, string>();
+  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  const step = Math.max(60, Math.floor(scroller.clientHeight * 0.8));
+
+  scroller.scrollTop = 0;
+  await sleep(30);
+
+  let guard = 0;
+  while (guard < 3000) {
+    captureVisibleLinesWithNumbers(scroller, acc);
+
+    const current = scroller.scrollTop;
+    if (current >= maxTop - 1) {
+      break;
+    }
+
+    const next = Math.min(maxTop, current + step);
+    if (next <= current) {
+      break;
+    }
+
+    scroller.scrollTop = next;
+    await sleep(22);
+    guard += 1;
+  }
+
+  scroller.scrollTop = maxTop;
+  await sleep(25);
+  captureVisibleLinesWithNumbers(scroller, acc);
+  scroller.scrollTop = originalTop;
+
+  if (!acc.size) {
+    return buildEditorLinesFromDom();
+  }
+
+  const maxLineNo = Math.max(...Array.from(acc.keys()));
+  const fullParts: string[] = [];
+  let missing = 0;
+  for (let n = 1; n <= maxLineNo; n += 1) {
+    const txt = acc.get(n);
+    if (txt == null) {
+      missing += 1;
+      fullParts.push("");
+    } else {
+      fullParts.push(txt);
+    }
+  }
+
+  const fullText = fullParts.join("\n");
+  const coverage = maxLineNo > 0 ? (maxLineNo - missing) / maxLineNo : 0;
+
+  return {
+    lines: buildLinesFromText(fullText),
+    fullText,
+    source: "dom-scroll-harvest",
+    lineCoverage: coverage
+  };
+}
+
+async function buildEditorLines(): Promise<EditorLines> {
   const fullTextFromState = getEditorTextFromCodeMirrorState();
   if (fullTextFromState != null) {
     console.log("buildEditorLines: Using CodeMirror state", { textLen: fullTextFromState.length, sample: fullTextFromState.substring(0, 100) });
     return {
       lines: buildLinesFromText(fullTextFromState),
-      fullText: fullTextFromState.replace(/\r\n?/g, "\n")
+      fullText: fullTextFromState.replace(/\r\n?/g, "\n"),
+      source: "codemirror-state",
+      lineCoverage: 1
     };
   }
-  console.warn("buildEditorLines: Falling back to DOM");
+
+  console.warn("buildEditorLines: CodeMirror state unavailable, trying scroll harvest");
+  const harvested = await buildEditorLinesByScrollingDom();
+  if (harvested.fullText.length > 0) {
+    return harvested;
+  }
+
+  console.warn("buildEditorLines: Scroll harvest failed, falling back to visible DOM lines");
   return buildEditorLinesFromDom();
 }
 
-function getFocusedHighlightText(fullText: string, dataPos: number): string {
-  const selectors = [
-    ".cm-content .ol-cm-change-focus .ol-cm-change",
-    ".cm-content .ol-cm-change",
-    ".cm-content .ol-cm-change-highlight",
-    ".cm-content .ol-cm-highlight-fix"
-  ];
+function getTextFragments(node: Element): string[] {
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  const fragments: string[] = [];
 
+  let current = walker.nextNode();
+  while (current) {
+    const text = normalizeSpaces(current.textContent ?? "");
+    if (text) {
+      fragments.push(text);
+    }
+    current = walker.nextNode();
+  }
+
+  return fragments;
+}
+
+function getUniqueCandidatesForSelector(selector: string): HighlightCandidate[] {
+  const nodes = Array.from(document.querySelectorAll(selector));
   const seen = new Set<string>();
-  const candidates: string[] = [];
+  const candidates: HighlightCandidate[] = [];
 
-  for (const selector of selectors) {
-    const nodes = Array.from(document.querySelectorAll(selector));
-    console.log("getFocusedHighlightText: Checked selector", { selector, foundNodes: nodes.length });
-    for (const node of nodes) {
-      const text = normalizeSpaces(node.textContent ?? "");
-      if (!text || seen.has(text)) {
-        continue;
-      }
-      seen.add(text);
-      candidates.push(text);
+  for (const node of nodes) {
+    const text = normalizeSpaces(node.textContent ?? "");
+    if (!text || seen.has(text)) {
+      continue;
     }
-  }
-
-  if (!candidates.length) {
-    console.warn("getFocusedHighlightText: No highlight text found");
-    return "";
-  }
-
-  if (dataPos < 0) {
-    return candidates[0];
-  }
-
-  let bestText = "";
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const candidate of candidates) {
-    const distance = getClosestOccurrenceDistance(fullText, candidate, dataPos);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestText = candidate;
-    }
-  }
-
-  if (bestText) {
-    console.log("getFocusedHighlightText: Selected nearest highlight", {
-      dataPos,
-      distance: bestDistance,
-      text: bestText.substring(0, 120)
+    seen.add(text);
+    const fragments = getTextFragments(node as Element);
+    candidates.push({
+      text,
+      fragments: fragments.length ? fragments : [text]
     });
   }
 
-  return bestText;
+  return candidates;
+}
+
+function getExactCandidateMatchAtPos(
+  fullText: string,
+  dataPos: number,
+  candidate: HighlightCandidate
+): ExactCandidateMatch | null {
+  if (dataPos < 0 || dataPos >= fullText.length) {
+    return null;
+  }
+
+  let cursor = dataPos;
+  let foundCount = 0;
+  let firstIdx = -1;
+  let lastEnd = -1;
+
+  for (let i = 0; i < candidate.fragments.length; i += 1) {
+    const fragment = candidate.fragments[i];
+    const idx = fullText.indexOf(fragment, cursor);
+    if (idx < 0) {
+      return null;
+    }
+
+    if (i === 0 && idx !== dataPos) {
+      return null;
+    }
+
+    if (firstIdx < 0) {
+      firstIdx = idx;
+    }
+    lastEnd = idx + fragment.length;
+    cursor = idx + fragment.length;
+    foundCount += 1;
+  }
+
+  if (foundCount === 0 || firstIdx !== dataPos || lastEnd < 0) {
+    return null;
+  }
+
+  return {
+    text: candidate.text,
+    fragmentCount: foundCount,
+    spanLength: lastEnd - firstIdx
+  };
+}
+
+function pickExactCandidateAtPos(fullText: string, dataPos: number, candidates: HighlightCandidate[]): string {
+  let best: ExactCandidateMatch | null = null;
+  let bestSpanLength = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const match = getExactCandidateMatchAtPos(fullText, dataPos, candidate);
+    if (!match) {
+      continue;
+    }
+
+    const shouldReplace =
+      !best
+      || match.fragmentCount > best.fragmentCount
+      || (match.fragmentCount === best.fragmentCount && match.spanLength < bestSpanLength);
+
+    if (shouldReplace) {
+      best = match;
+      bestSpanLength = match.spanLength;
+    }
+  }
+
+  return best?.text ?? "";
+}
+
+function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighlightDetails {
+  const focusComment = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-focus .ol-cm-change-c, .cm-content .ol-cm-change-focus .ol-cm-change-highlight-c"
+  );
+  const focusAny = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-focus .ol-cm-change"
+  );
+  const highlightComment = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-highlight-c"
+  );
+  const highlightAny = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-highlight"
+  );
+  const changeComment = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-c"
+  );
+  const changeAny = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change"
+  );
+
+  console.log("getFocusedHighlightDetails: bucket counts", {
+    focusComment: focusComment.length,
+    focusAny: focusAny.length,
+    highlightComment: highlightComment.length,
+    highlightAny: highlightAny.length,
+    changeComment: changeComment.length,
+    changeAny: changeAny.length
+  });
+
+  const commentBuckets: Array<{ source: string; candidates: HighlightCandidate[] }> = [
+    { source: "focusComment", candidates: focusComment },
+    { source: "highlightComment", candidates: highlightComment },
+    { source: "changeComment", candidates: changeComment }
+  ];
+
+  if (dataPos < 0 || dataPos >= fullText.length) {
+    return {
+      text: "",
+      source: "invalidDataPos",
+      focusCommentCount: focusComment.length,
+      focusAnyCount: focusAny.length,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: highlightAny.length,
+      changeCommentCount: changeComment.length,
+      changeAnyCount: changeAny.length
+    };
+  }
+
+  for (const bucket of commentBuckets) {
+    const text = pickExactCandidateAtPos(fullText, dataPos, bucket.candidates);
+    if (text) {
+      return {
+        text,
+        source: bucket.source,
+        focusCommentCount: focusComment.length,
+        focusAnyCount: focusAny.length,
+        highlightCommentCount: highlightComment.length,
+        highlightAnyCount: highlightAny.length,
+        changeCommentCount: changeComment.length,
+        changeAnyCount: changeAny.length
+      };
+    }
+  }
+
+  return {
+    text: "",
+    source: "none",
+    focusCommentCount: focusComment.length,
+    focusAnyCount: focusAny.length,
+    highlightCommentCount: highlightComment.length,
+    highlightAnyCount: highlightAny.length,
+    changeCommentCount: changeComment.length,
+    changeAnyCount: changeAny.length
+  };
 }
 
 function isEntryHighlighted(entry: Element): boolean {
@@ -394,261 +715,376 @@ function isCurrentHighlightedEntry(entry: Element): boolean {
   return current === entry;
 }
 
-function getFocusedHighlightBlock(): string {
-  const focusNodes = Array.from(document.querySelectorAll(".cm-content .ol-cm-change-focus .ol-cm-change"));
-  if (!focusNodes.length) {
-    return "";
-  }
-
-  const lines: string[] = [];
-  const seen = new Set<string>();
-  for (const node of focusNodes) {
-    const text = normalizeSpaces(node.textContent ?? "");
-    if (!text || seen.has(text)) {
-      continue;
-    }
-    seen.add(text);
-    lines.push(text);
-  }
-
-  return lines.join("\n").trim();
-}
-
-function getNumberAttr(el: Element, attr: string): number | null {
-  const raw = el.getAttribute(attr);
-  if (!raw) {
-    return null;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function getFocusedChangeTokens(): string[] {
-  const nodes = Array.from(document.querySelectorAll(".cm-content .ol-cm-change-focus .ol-cm-change-c"));
-  const seen = new Set<string>();
-  const tokens: string[] = [];
-
-  for (const node of nodes) {
-    const text = normalizeSpaces(node.textContent ?? "");
-    if (!text || seen.has(text)) {
-      continue;
-    }
-    seen.add(text);
-    tokens.push(text);
-  }
-
-  return tokens;
-}
-
-function overlapScore(commentText: string, candidate: string): number {
-  const commentWords = new Set(
-    commentText
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length >= 4)
-  );
-  if (!commentWords.size) {
-    return 0;
-  }
-
-  const candidateWords = candidate
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length >= 4);
-
-  let score = 0;
-  for (const w of candidateWords) {
-    if (commentWords.has(w)) {
-      score += 1;
-    }
-  }
-  return score;
-}
-
-function pickFocusedTokenFallback(commentText: string, entry: Element, entryList: Element[]): string {
-  const tokens = getFocusedChangeTokens();
-  if (!tokens.length) {
-    return "";
-  }
-
-  let best = "";
-  let bestScore = -1;
-  for (const token of tokens) {
-    const score = overlapScore(commentText, token);
-    if (score > bestScore) {
-      bestScore = score;
-      best = token;
-    }
-  }
-
-  if (bestScore > 0) {
-    return best;
-  }
-
-  const currentTop = getNumberAttr(entry, "data-top");
-  const currentPos = getNumberAttr(entry, "data-pos");
-  if (currentTop == null || currentPos == null) {
-    return tokens[0];
-  }
-
-  const local = entryList
-    .map((el) => ({
-      el,
-      top: getNumberAttr(el, "data-top"),
-      pos: getNumberAttr(el, "data-pos")
-    }))
-    .filter((x): x is { el: Element; top: number; pos: number } => x.top != null && x.pos != null)
-    .filter((x) => Math.abs(x.top - currentTop) <= 120)
-    .sort((a, b) => (a.top - b.top) || (a.pos - b.pos));
-
-  const index = local.findIndex((x) => x.el === entry);
-  if (index < 0) {
-    return tokens[0];
-  }
-
-  return tokens[Math.min(index, tokens.length - 1)];
-}
-
-async function focusReviewEntry(entry: Element): Promise<void> {
-  const target =
-    (entry.querySelector(".review-panel-entry-content") as HTMLElement | null)
-    ?? (entry.querySelector(".review-panel-comment-body") as HTMLElement | null)
-    ?? (entry.querySelector(".review-panel-entry-indicator") as HTMLElement | null)
-    ?? (entry as HTMLElement);
-  console.log("focusReviewEntry: Clicking entry", {
-    hasContent: entry.querySelector(".review-panel-entry-content") != null,
-    hasCommentBody: entry.querySelector(".review-panel-comment-body") != null,
-    hasIndicator: entry.querySelector(".review-panel-entry-indicator") != null
-  });
-
-  target.scrollIntoView({ block: "nearest", inline: "nearest" });
-  dispatchMouseEvent(target, "mouseenter");
-  dispatchMouseEvent(target, "mouseover");
-  dispatchMouseEvent(target, "mousemove");
-  dispatchMouseEvent(target, "mousedown");
-  dispatchMouseEvent(target, "mouseup");
-  dispatchMouseEvent(target, "click");
-  target.focus();
-  await sleep(140);
-
-  const selection = getEditorSelectionFromCodeMirrorState();
-  console.log("focusReviewEntry: After click", {
-    selection,
-    highlighted: isCurrentHighlightedEntry(entry)
-  });
-}
-
 function dispatchMouseEvent(target: HTMLElement, type: string): void {
   target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
 }
 
 async function hoverReviewEntry(entry: Element): Promise<void> {
   const target =
-    (entry.querySelector(".review-panel-entry-indicator") as HTMLElement | null)
+    (entry.querySelector(".review-panel-entry-content") as HTMLElement | null)
+    ?? (entry.querySelector(".review-panel-comment-body") as HTMLElement | null)
+    ?? (entry.querySelector(".review-panel-entry-indicator") as HTMLElement | null)
     ?? (entry as HTMLElement);
-  console.log("hoverReviewEntry: Hovering entry", { hasIndicator: entry.querySelector(".review-panel-entry-indicator") != null });
+  const awayTarget = (document.querySelector(".review-panel") as HTMLElement | null) ?? document.body;
 
-  dispatchMouseEvent(target, "mouseenter");
-  dispatchMouseEvent(target, "mouseover");
-  dispatchMouseEvent(target, "mousemove");
-  await sleep(90);
+  console.log("hoverReviewEntry: Activating entry with click/hover cycle", {
+    hasContent: entry.querySelector(".review-panel-entry-content") != null,
+    hasCommentBody: entry.querySelector(".review-panel-comment-body") != null,
+    hasIndicator: entry.querySelector(".review-panel-entry-indicator") != null
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+
+    // Initial hover and click on the comment entry.
+    dispatchMouseEvent(target, "mouseenter");
+    dispatchMouseEvent(target, "mouseover");
+    dispatchMouseEvent(target, "mousemove");
+    dispatchMouseEvent(target, "mousedown");
+    dispatchMouseEvent(target, "mouseup");
+    dispatchMouseEvent(target, "click");
+    await sleep(70);
+
+    // Hover away, then hover back to trigger Overleaf's visual highlight refresh.
+    dispatchMouseEvent(target, "mouseleave");
+    dispatchMouseEvent(target, "mouseout");
+    dispatchMouseEvent(awayTarget, "mousemove");
+    dispatchMouseEvent(awayTarget, "mouseover");
+    await sleep(50);
+
+    dispatchMouseEvent(target, "mouseenter");
+    dispatchMouseEvent(target, "mouseover");
+    dispatchMouseEvent(target, "mousemove");
+    await sleep(90);
+
+    if (isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)) {
+      break;
+    }
+  }
 }
 
-async function waitForRelevantSelection(dataPos: number, previous: SelectionLike | null): Promise<SelectionLike | null> {
-  let latest: SelectionLike | null = null;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    latest = getEditorSelectionFromCodeMirrorState();
-    if (!hasNonEmptySelection(latest)) {
-      await sleep(35);
+async function hoverOnlyReviewEntry(entry: Element): Promise<void> {
+  const target =
+    (entry.querySelector(".review-panel-entry-content") as HTMLElement | null)
+    ?? (entry.querySelector(".review-panel-comment-body") as HTMLElement | null)
+    ?? (entry.querySelector(".review-panel-entry-indicator") as HTMLElement | null)
+    ?? (entry as HTMLElement);
+  const awayTarget = (document.querySelector(".review-panel") as HTMLElement | null) ?? document.body;
+
+  console.log("hoverOnlyReviewEntry: Activating entry with hover-only cycle");
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    dispatchMouseEvent(target, "mouseenter");
+    dispatchMouseEvent(target, "mouseover");
+    dispatchMouseEvent(target, "mousemove");
+    await sleep(100);
+
+    dispatchMouseEvent(target, "mouseleave");
+    dispatchMouseEvent(target, "mouseout");
+    dispatchMouseEvent(awayTarget, "mousemove");
+    dispatchMouseEvent(awayTarget, "mouseover");
+    await sleep(60);
+
+    dispatchMouseEvent(target, "mouseenter");
+    dispatchMouseEvent(target, "mouseover");
+    dispatchMouseEvent(target, "mousemove");
+    await sleep(100);
+
+    if (isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)) {
+      break;
+    }
+  }
+}
+
+function getVisibleLineRange(scroller: HTMLElement): { start: number; end: number } {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const gutterEls = Array.from(scroller.querySelectorAll(".cm-lineNumbers .cm-gutterElement"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement);
+  const lines = gutterEls
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      const visible = rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom;
+      if (!visible) {
+        return null;
+      }
+      return parseLineNumber(el.textContent ?? "");
+    })
+    .filter((n): n is number => n != null)
+    .sort((a, b) => a - b);
+
+  if (!lines.length) {
+    return { start: -1, end: -1 };
+  }
+
+  return { start: lines[0], end: lines[lines.length - 1] };
+}
+
+type VisibleGutterEntry = {
+  lineNo: number;
+  top: number;
+  el: HTMLElement;
+};
+
+function getVisibleGutterEntries(scroller: HTMLElement): VisibleGutterEntry[] {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const gutterEls = Array.from(scroller.querySelectorAll(".cm-lineNumbers .cm-gutterElement"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement);
+
+  const entries: VisibleGutterEntry[] = [];
+  for (const el of gutterEls) {
+    const lineNo = parseLineNumber(el.textContent ?? "");
+    if (lineNo == null) {
       continue;
     }
-
-    const changed = !selectionsEqual(latest, previous);
-    const relevant = isSelectionRelevantToPos(latest, dataPos);
-    if (changed || relevant) {
-      return latest;
+    const rect = el.getBoundingClientRect();
+    const visible = rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom;
+    if (!visible) {
+      continue;
     }
-
-    await sleep(35);
+    entries.push({ lineNo, top: rect.top, el });
   }
-  return latest;
+
+  entries.sort((a, b) => a.lineNo - b.lineNo);
+  return entries;
 }
 
-async function activateReviewEntry(entry: Element, dataPos: number, previous: SelectionLike | null): Promise<SelectionLike | null> {
-  let selection = await waitForRelevantSelection(dataPos, previous);
-  if (isCurrentHighlightedEntry(entry)) {
-    return selection;
+function estimatePixelsPerLine(entries: VisibleGutterEntry[]): number {
+  if (entries.length < 2) {
+    return 0;
   }
 
-  // Overleaf can ignore a single click when entries are virtualized; retry activation.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await focusReviewEntry(entry);
-    selection = await waitForRelevantSelection(dataPos, selection);
-    if (isCurrentHighlightedEntry(entry)) {
-      return selection;
+  const samples: number[] = [];
+  for (let i = 1; i < entries.length; i += 1) {
+    const prev = entries[i - 1];
+    const curr = entries[i];
+    const lineDelta = curr.lineNo - prev.lineNo;
+    if (lineDelta <= 0) {
+      continue;
+    }
+    const pxDelta = curr.top - prev.top;
+    if (pxDelta <= 0) {
+      continue;
+    }
+    samples.push(pxDelta / lineDelta);
+  }
+
+  if (!samples.length) {
+    return 0;
+  }
+
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+  return Number.isFinite(avg) ? avg : 0;
+}
+
+function buildScrollCheck(scroller: HTMLElement | null, targetLine: number, method: string): ScrollCheck {
+  if (!scroller || targetLine < 0) {
+    return {
+      method,
+      targetLine,
+      visibleStart: -1,
+      visibleEnd: -1,
+      targetVisible: false
+    };
+  }
+
+  const range = getVisibleLineRange(scroller);
+  return {
+    method,
+    targetLine,
+    visibleStart: range.start,
+    visibleEnd: range.end,
+    targetVisible: range.start >= 0 && targetLine >= range.start && targetLine <= range.end
+  };
+}
+
+function getLineNumberFromOffsets(lines: Array<[number, string]>, pos: number): number {
+  if (!lines.length || pos < 0) {
+    return -1;
+  }
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const [start, text] = lines[i];
+    const end = start + text.length;
+    if (start <= pos && pos <= end) {
+      return i + 1;
     }
   }
 
-  return selection;
+  return -1;
+}
+
+function findGutterForLine(scroller: HTMLElement, targetLine: number): HTMLElement | null {
+  const gutterEls = Array.from(scroller.querySelectorAll(".cm-lineNumbers .cm-gutterElement"))
+    .filter((el): el is HTMLElement => el instanceof HTMLElement);
+
+  for (const gutterEl of gutterEls) {
+    if (parseLineNumber(gutterEl.textContent ?? "") === targetLine) {
+      return gutterEl;
+    }
+  }
+
+  return null;
+}
+
+async function tryAlignToGutterLine(scroller: HTMLElement, targetLine: number): Promise<boolean> {
+  const gutterEl = findGutterForLine(scroller, targetLine);
+  if (!gutterEl) {
+    return false;
+  }
+
+  const targetTop = scroller.scrollTop + gutterEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  scroller.scrollTop = Math.max(0, targetTop - scroller.clientHeight / 2);
+  await sleep(70);
+  return true;
+}
+
+async function scrollEditorToPos(pos: number, editorLines?: Array<[number, string]>): Promise<ScrollCheck> {
+  if (pos < 0) {
+    return {
+      method: "invalid-pos",
+      targetLine: -1,
+      visibleStart: -1,
+      visibleEnd: -1,
+      targetVisible: false
+    };
+  }
+
+  const scroller = document.querySelector(".cm-editor .cm-scroller") as HTMLElement | null;
+  const view = getEditorViewLike();
+  const targetLineFromDoc = view?.state.doc.lineAt?.(pos)?.number;
+  const targetLineFromOffsets = editorLines ? getLineNumberFromOffsets(editorLines, pos) : -1;
+  const targetLine = targetLineFromDoc ?? targetLineFromOffsets;
+
+  if (view) {
+    try {
+      view.focus?.();
+      view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+      await sleep(80);
+      return buildScrollCheck(scroller, targetLine, "cm-dispatch-scrollIntoView");
+    } catch (error) {
+      console.warn("scrollEditorToPos: CodeMirror dispatch scroll failed", { pos, error: String(error) });
+    }
+  }
+
+  if (!scroller) {
+    return buildScrollCheck(null, targetLine, "no-scroller");
+  }
+
+  const viewLine = targetLine;
+
+  if (viewLine < 1) {
+    return buildScrollCheck(scroller, targetLine, "manual-scroll-precheck-failed");
+  }
+
+  if (await tryAlignToGutterLine(scroller, viewLine)) {
+    return buildScrollCheck(scroller, targetLine, "manual-gutter-align");
+  }
+
+  // Coarse jump using line ratio when we have harvested line offsets.
+  if (editorLines && editorLines.length > 1) {
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    if (maxTop > 0) {
+      const ratio = Math.max(0, Math.min(1, (viewLine - 1) / (editorLines.length - 1)));
+      const estimatedTop = Math.floor(ratio * maxTop);
+      scroller.scrollTop = Math.max(0, estimatedTop - Math.floor(scroller.clientHeight / 2));
+      await sleep(80);
+
+      if (await tryAlignToGutterLine(scroller, viewLine)) {
+        return buildScrollCheck(scroller, targetLine, "manual-ratio-seek-align");
+      }
+    }
+  }
+
+  // Predictive jump by visible line delta when target is off-screen.
+  const visibleEntries = getVisibleGutterEntries(scroller);
+  const pxPerLine = estimatePixelsPerLine(visibleEntries);
+  if (visibleEntries.length > 0 && pxPerLine > 0) {
+    let nearest = visibleEntries[0];
+    let nearestDist = Math.abs(viewLine - nearest.lineNo);
+    for (const entry of visibleEntries) {
+      const dist = Math.abs(viewLine - entry.lineNo);
+      if (dist < nearestDist) {
+        nearest = entry;
+        nearestDist = dist;
+      }
+    }
+
+    const lineDelta = viewLine - nearest.lineNo;
+    if (lineDelta !== 0) {
+      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const nextTop = Math.max(0, Math.min(maxTop, scroller.scrollTop + lineDelta * pxPerLine));
+      scroller.scrollTop = nextTop;
+      await sleep(80);
+
+      if (await tryAlignToGutterLine(scroller, viewLine)) {
+        return buildScrollCheck(scroller, targetLine, "manual-line-delta-seek-align");
+      }
+    }
+  }
+
+  // Step towards the target line range if it's still not rendered.
+  const step = Math.max(80, Math.floor(scroller.clientHeight * 0.85));
+  for (let i = 0; i < 12; i += 1) {
+    const range = getVisibleLineRange(scroller);
+    if (range.start < 0 || range.end < 0) {
+      break;
+    }
+
+    if (viewLine < range.start) {
+      scroller.scrollTop = Math.max(0, scroller.scrollTop - step);
+    } else if (viewLine > range.end) {
+      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = Math.min(maxTop, scroller.scrollTop + step);
+    } else {
+      if (await tryAlignToGutterLine(scroller, viewLine)) {
+        return buildScrollCheck(scroller, targetLine, "manual-range-seek-align");
+      }
+      break;
+    }
+
+    await sleep(70);
+
+    if (await tryAlignToGutterLine(scroller, viewLine)) {
+      return buildScrollCheck(scroller, targetLine, "manual-step-seek-align");
+    }
+  }
+
+  return buildScrollCheck(scroller, targetLine, "manual-target-line-not-found");
 }
 
 function getContextAtPos(editor: EditorLines, pos: number): [string, string] {
   const { lines, fullText } = editor;
-  if (!lines.length || !fullText.length || pos < 0) {
-    console.warn("getContextAtPos: No editor lines or fullText", { linesCount: lines.length, fullTextLen: fullText.length, pos });
-    return ["", ""];
+  if (!lines.length || !fullText.length) {
+    throw new Error("Exact context extraction failed: editor text is empty.");
   }
 
-  const clampedPos = Math.max(0, Math.min(pos, Math.max(0, fullText.length - 1)));
-  console.log("getContextAtPos: Processing pos", { originalPos: pos, clampedPos, fullTextLen: fullText.length });
+  if (pos < 0) {
+    throw new Error(`Exact context extraction failed: invalid position ${pos}.`);
+  }
+
+  if (pos >= fullText.length) {
+    throw new Error(`Exact context extraction failed: position ${pos} is outside editor text length ${fullText.length}.`);
+  }
+
+  const clampedPos = pos;
+  console.log("getContextAtPos: Processing exact pos", { pos: clampedPos, fullTextLen: fullText.length });
 
   let highlighted = "";
   let anchorLineIndex = -1;
-  // First pass: find non-empty line containing position
   for (let i = 0; i < lines.length; i += 1) {
     const [start, text] = lines[i];
     const end = start + text.length;
-    if (text.length > 0 && start <= clampedPos && clampedPos <= end) {
+    if (start <= clampedPos && clampedPos <= end) {
       highlighted = text;
       anchorLineIndex = i;
-      console.log("getContextAtPos: Found non-empty line containing position", { start, end, textLen: text.length, text: text.substring(0, 50) });
+      console.log("getContextAtPos: Found line containing exact position", { start, end, textLen: text.length, text: text.substring(0, 50) });
       break;
     }
   }
-  
-  // Second pass: if no non-empty line found, find any line containing position (including empty)
-  if (!highlighted) {
-    for (let i = 0; i < lines.length; i += 1) {
-      const [start, text] = lines[i];
-      const end = start + text.length;
-      if (start <= clampedPos && clampedPos <= end) {
-        highlighted = text;
-        anchorLineIndex = i;
-        console.log("getContextAtPos: Found line (possibly empty) containing position", { start, end, textLen: text.length });
-        break;
-      }
-    }
-  }
-  
-  // Fallback: find closest non-empty line before position
-  if (!highlighted) {
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const [start, text] = lines[i];
-      if (text.length > 0 && start <= clampedPos) {
-        highlighted = text;
-        anchorLineIndex = i;
-        console.log("getContextAtPos: Using closest prior non-empty line", { start, textLen: text.length, text: text.substring(0, 50) });
-        break;
-      }
-    }
-  }
-  
-  if (!highlighted) {
-    highlighted = lines[lines.length - 1][1];
-    anchorLineIndex = lines.length - 1;
-    console.warn("getContextAtPos: No suitable line found, using last line");
+
+  if (anchorLineIndex < 0) {
+    throw new Error(`Exact context extraction failed: no line contains position ${clampedPos}.`);
   }
 
   let startLine = 0;
@@ -693,152 +1129,529 @@ function getContextAtPos(editor: EditorLines, pos: number): [string, string] {
   return [highlighted, context];
 }
 
-function sliceFromSelection(fullText: string, selection: SelectionLike | null): string {
-  if (!selection || selection.to <= selection.from) {
-    console.log("sliceFromSelection: Invalid selection", { selection, fullTextLen: fullText.length });
+function getTokenAtPos(fullText: string, pos: number): string {
+  if (pos < 0 || pos >= fullText.length) {
     return "";
   }
 
-  const start = Math.max(0, Math.min(selection.from, fullText.length));
-  const end = Math.max(start, Math.min(selection.to, fullText.length));
-  const result = fullText.slice(start, end).trim();
-  console.log("sliceFromSelection: Extracted text", { from: selection.from, to: selection.to, start, end, textLen: result.length, text: result.substring(0, 50) });
-  return result;
+  const isNonSpace = (ch: string): boolean => ch.trim().length > 0;
+
+  let center = pos;
+  if (!isNonSpace(fullText[center])) {
+    let found = -1;
+    for (let d = 1; d <= 80; d += 1) {
+      const right = pos + d;
+      if (right < fullText.length && isNonSpace(fullText[right])) {
+        found = right;
+        break;
+      }
+      const left = pos - d;
+      if (left >= 0 && isNonSpace(fullText[left])) {
+        found = left;
+        break;
+      }
+    }
+    if (found < 0) {
+      return "";
+    }
+    center = found;
+  }
+
+  let start = center;
+  while (start > 0 && isNonSpace(fullText[start - 1])) {
+    start -= 1;
+  }
+
+  let end = center + 1;
+  while (end < fullText.length && isNonSpace(fullText[end])) {
+    end += 1;
+  }
+
+  return fullText.slice(start, end).trim();
 }
 
-async function extractComments(): Promise<CommentRow[]> {
+function isWhitespaceChar(ch: string): boolean {
+  return /\s/.test(ch);
+}
+
+function isPhraseBoundaryChar(ch: string): boolean {
+  return ch === "\n" || /[.!?;:]/.test(ch);
+}
+
+function findNearestNonWhitespaceIndex(fullText: string, pos: number, maxDistance = 80): number {
+  if (pos < 0 || pos >= fullText.length) {
+    return -1;
+  }
+
+  if (!isWhitespaceChar(fullText[pos])) {
+    return pos;
+  }
+
+  for (let d = 1; d <= maxDistance; d += 1) {
+    const right = pos + d;
+    if (right < fullText.length && !isWhitespaceChar(fullText[right])) {
+      return right;
+    }
+
+    const left = pos - d;
+    if (left >= 0 && !isWhitespaceChar(fullText[left])) {
+      return left;
+    }
+  }
+
+  return -1;
+}
+
+function getTokenSpanAt(fullText: string, pos: number): [number, number] | null {
+  const center = findNearestNonWhitespaceIndex(fullText, pos);
+  if (center < 0 || isPhraseBoundaryChar(fullText[center])) {
+    return null;
+  }
+
+  let start = center;
+  while (start > 0 && !isWhitespaceChar(fullText[start - 1]) && !isPhraseBoundaryChar(fullText[start - 1])) {
+    start -= 1;
+  }
+
+  let end = center + 1;
+  while (end < fullText.length && !isWhitespaceChar(fullText[end]) && !isPhraseBoundaryChar(fullText[end])) {
+    end += 1;
+  }
+
+  return end > start ? [start, end] : null;
+}
+
+function findPrevTokenSpan(fullText: string, fromExclusive: number): [number, number] | null {
+  let i = fromExclusive - 1;
+  while (i >= 0 && isWhitespaceChar(fullText[i])) {
+    i -= 1;
+  }
+
+  if (i < 0 || isPhraseBoundaryChar(fullText[i])) {
+    return null;
+  }
+
+  const end = i + 1;
+  while (i >= 0 && !isWhitespaceChar(fullText[i]) && !isPhraseBoundaryChar(fullText[i])) {
+    i -= 1;
+  }
+  return [i + 1, end];
+}
+
+function findNextTokenSpan(fullText: string, fromInclusive: number): [number, number] | null {
+  let i = fromInclusive;
+  while (i < fullText.length && isWhitespaceChar(fullText[i])) {
+    i += 1;
+  }
+
+  if (i >= fullText.length || isPhraseBoundaryChar(fullText[i])) {
+    return null;
+  }
+
+  const start = i;
+  while (i < fullText.length && !isWhitespaceChar(fullText[i]) && !isPhraseBoundaryChar(fullText[i])) {
+    i += 1;
+  }
+  return [start, i];
+}
+
+function getPhraseAtPos(fullText: string, pos: number, maxTokens = 10, maxChars = 140): string {
+  const tokenSpan = getTokenSpanAt(fullText, pos);
+  if (!tokenSpan) {
+    return "";
+  }
+
+  let [start, end] = tokenSpan;
+  let tokenCount = 1;
+
+  while (tokenCount < maxTokens) {
+    const prev = findPrevTokenSpan(fullText, start);
+    if (!prev) {
+      break;
+    }
+    const [prevStart] = prev;
+    if (end - prevStart > maxChars) {
+      break;
+    }
+    start = prevStart;
+    tokenCount += 1;
+  }
+
+  while (tokenCount < maxTokens) {
+    const next = findNextTokenSpan(fullText, end);
+    if (!next) {
+      break;
+    }
+    const [, nextEnd] = next;
+    if (nextEnd - start > maxChars) {
+      break;
+    }
+    end = nextEnd;
+    tokenCount += 1;
+  }
+
+  return normalizeSpaces(fullText.slice(start, end));
+}
+
+function reconcileUiHighlightWithPhrase(fullText: string, dataPos: number, uiHighlight: string): string {
+  const ui = normalizeSpaces(uiHighlight);
+  if (!ui) {
+    return "";
+  }
+
+  // If UI text is already substantial, keep it as-is.
+  if (ui.length >= 20) {
+    return ui;
+  }
+
+  const phrase = getPhraseAtPos(fullText, dataPos, 12, 160);
+  if (!phrase || phrase.length <= ui.length) {
+    return ui;
+  }
+
+  return phrase.toLowerCase().startsWith(ui.toLowerCase()) ? phrase : ui;
+}
+
+function getSelectorForUiSource(source: string): string | null {
+  if (source === "focusComment") {
+    return ".cm-content .ol-cm-change-focus .ol-cm-change-c, .cm-content .ol-cm-change-focus .ol-cm-change-highlight-c";
+  }
+  if (source === "highlightComment") {
+    return ".cm-content .ol-cm-change-highlight-c";
+  }
+  if (source === "changeComment") {
+    return ".cm-content .ol-cm-change-c";
+  }
+  return null;
+}
+
+function extendUiHighlightAcrossAdjacentCandidates(
+  fullText: string,
+  dataPos: number,
+  uiHighlight: string,
+  uiSource: string
+): string {
+  const base = normalizeSpaces(uiHighlight);
+  if (!base || dataPos < 0 || dataPos >= fullText.length) {
+    return base;
+  }
+
+  const selector = getSelectorForUiSource(uiSource);
+  if (!selector) {
+    return base;
+  }
+
+  const candidates = getUniqueCandidatesForSelector(selector)
+    .map((c) => normalizeSpaces(c.text))
+    .filter((t) => !!t);
+  if (candidates.length < 2) {
+    return base;
+  }
+
+  let cursor = dataPos + base.length;
+  let resolved = base;
+  const used = new Set<string>([base]);
+
+  // Append nearby highlighted fragments that continue immediately after the first match.
+  for (let pass = 0; pass < 8; pass += 1) {
+    let bestText = "";
+    let bestIdx = Number.POSITIVE_INFINITY;
+
+    for (const text of candidates) {
+      if (!text || used.has(text)) {
+        continue;
+      }
+
+      const idx = fullText.indexOf(text, Math.max(0, cursor - 1));
+      if (idx < 0) {
+        continue;
+      }
+
+      const gap = idx - cursor;
+      if (gap < 0 || gap > 3) {
+        continue;
+      }
+
+      if (idx < bestIdx || (idx === bestIdx && text.length > bestText.length)) {
+        bestIdx = idx;
+        bestText = text;
+      }
+    }
+
+    if (!bestText || !Number.isFinite(bestIdx)) {
+      break;
+    }
+
+    const join = fullText.slice(cursor, bestIdx);
+    resolved = normalizeSpaces(`${resolved} ${join} ${bestText}`);
+    cursor = bestIdx + bestText.length;
+    used.add(bestText);
+  }
+
+  return resolved;
+}
+
+function resolveHighlightAtPos(fullText: string, dataPos: number, uiDetails: UiHighlightDetails): HighlightResolution {
+  const uiHighlight = normalizeSpaces(uiDetails.text);
+  if (uiHighlight) {
+    const multilineExtended = extendUiHighlightAcrossAdjacentCandidates(fullText, dataPos, uiHighlight, uiDetails.source);
+    const reconciled = reconcileUiHighlightWithPhrase(fullText, dataPos, multilineExtended);
+    const uiSourceLabel = multilineExtended !== uiHighlight
+      ? `uiHighlightExactMultiLine:${uiDetails.source}`
+      : `uiHighlightExact:${uiDetails.source}`;
+    if (reconciled !== uiHighlight) {
+      return {
+        text: reconciled,
+        source: `${uiSourceLabel}:reconciled`,
+        confidence: "high"
+      };
+    }
+
+    return {
+      text: multilineExtended,
+      source: uiSourceLabel,
+      confidence: "high"
+    };
+  }
+
+  const phrase = getPhraseAtPos(fullText, dataPos, 10, 140);
+  const token = getTokenAtPos(fullText, dataPos);
+
+  if (phrase && phrase.split(/\s+/).length >= 2) {
+    return {
+      text: phrase,
+      source: "posPhraseFallback",
+      confidence: "medium"
+    };
+  }
+
+  if (token) {
+    return {
+      text: token,
+      source: "posTokenFallback",
+      confidence: "low"
+    };
+  }
+
+  return {
+    text: "",
+    source: "noHighlightResolved",
+    confidence: "none"
+  };
+}
+
+function buildThreadDebugString(params: {
+  highlightSource: string;
+  highlightConfidence: HighlightConfidence;
+  interactionMode: "hover-click-cycle" | "hover-only";
+  entryHighlighted: boolean;
+  dataPos: number;
+  activePos: number;
+  uiDetails: UiHighlightDetails;
+  uiHighlight: string;
+  editorSource: EditorLines["source"];
+  editorLineCoverage: number;
+  threadId: string;
+  scrollCheck: ScrollCheck;
+}): string {
+  return [
+    `threadId=${params.threadId}`,
+    `source=${params.highlightSource}`,
+    `confidence=${params.highlightConfidence}`,
+    `interaction=${params.interactionMode}`,
+    `entryHighlighted=${params.entryHighlighted}`,
+    `dataPos=${params.dataPos}`,
+    `activePos=${params.activePos}`,
+    `uiSource=${params.uiDetails.source}`,
+    `uiFocusCommentN=${params.uiDetails.focusCommentCount}`,
+    `uiFocusAnyN=${params.uiDetails.focusAnyCount}`,
+    `uiHighlightCommentN=${params.uiDetails.highlightCommentCount}`,
+    `uiHighlightAnyN=${params.uiDetails.highlightAnyCount}`,
+    `uiChangeCommentN=${params.uiDetails.changeCommentCount}`,
+    `uiChangeAnyN=${params.uiDetails.changeAnyCount}`,
+    `uiLen=${normalizeSpaces(params.uiHighlight).length}`,
+    `editorSource=${params.editorSource}`,
+    `editorLineCoverage=${params.editorLineCoverage.toFixed(3)}`,
+    `scrollMethod=${params.scrollCheck.method}`,
+    `scrollTargetLine=${params.scrollCheck.targetLine}`,
+    `scrollTargetComputed=${params.scrollCheck.targetLine >= 0}`,
+    `scrollVisibleStart=${params.scrollCheck.visibleStart}`,
+    `scrollVisibleEnd=${params.scrollCheck.visibleEnd}`,
+    `scrollTargetVisible=${params.scrollCheck.targetVisible}`
+  ].join(" | ");
+}
+
+async function extractComments(): Promise<ExtractCommentsResult> {
   const rows: CommentRow[] = [];
+  const errors: string[] = [];
   const expandedBeforeExtraction = await expandCollapsedComments(document);
   console.log("extractComments: Expanded collapsed comments before extraction", { expandedBeforeExtraction });
-  const editor = buildEditorLines();
-  console.log("extractComments: Editor lines built", { linesCount: editor.lines.length, fullTextLen: editor.fullText.length, fullText: editor.fullText.substring(0, 200) });
+  const editor = await buildEditorLines();
+  console.log("extractComments: Editor lines built", {
+    source: editor.source,
+    lineCoverage: editor.lineCoverage,
+    linesCount: editor.lines.length,
+    fullTextLen: editor.fullText.length,
+    fullText: editor.fullText.substring(0, 200)
+  });
 
   const entries = document.querySelectorAll(".review-panel-entry-comment");
   const entryList = Array.from(entries);
   console.log("extractComments: Found entries", { count: entries.length });
-  let previousSelection: SelectionLike | null = null;
   
   for (const entry of entryList) {
-    const expandedInEntry = await expandCollapsedComments(entry);
-    if (expandedInEntry > 0) {
-      console.log("extractComments: Expanded collapsed comments in entry", { expandedInEntry });
-    }
-
-    const threadId = extractThreadId(entry);
-    const dataPos = Number.parseInt(entry.getAttribute("data-pos") ?? "-1", 10);
-    const rootCommentText = normalizeSpaces(entry.querySelector(".review-panel-comment-body")?.textContent ?? "");
-    const selectionBefore = getEditorSelectionFromCodeMirrorState();
-
-    await hoverReviewEntry(entry);
-    let selection = await activateReviewEntry(entry, dataPos, previousSelection);
-    let uiHighlight = getFocusedHighlightText(editor.fullText, dataPos);
-    let focusedBlock = isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)
-      ? getFocusedHighlightBlock()
-      : "";
-    let interactionMode: "hover" | "click" = "hover";
-
-    const hoverSelectionHighlight = normalizeSpaces(sliceFromSelection(editor.fullText, selection));
-    const hoverSelectionChanged = !selectionsEqual(selection, selectionBefore);
-    let validSelectionHighlight =
-      hasNonEmptySelection(selection) && hoverSelectionChanged && hoverSelectionHighlight
-        ? hoverSelectionHighlight
-        : "";
-    let validUiHighlight = !validSelectionHighlight ? focusedBlock : "";
-    let validFocusedTokenFallback = !validSelectionHighlight && !validUiHighlight
-      ? pickFocusedTokenFallback(rootCommentText, entry, entryList)
-      : "";
-
-    if (!validSelectionHighlight && !validUiHighlight && !validFocusedTokenFallback) {
-      selection = await activateReviewEntry(entry, dataPos, selection);
-      uiHighlight = getFocusedHighlightText(editor.fullText, dataPos);
-      focusedBlock = isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)
-        ? getFocusedHighlightBlock()
-        : "";
-      interactionMode = "click";
-
-      const clickSelectionHighlight = normalizeSpaces(sliceFromSelection(editor.fullText, selection));
-      const clickSelectionChanged = !selectionsEqual(selection, selectionBefore);
-      validSelectionHighlight =
-        hasNonEmptySelection(selection) && clickSelectionChanged && clickSelectionHighlight
-          ? clickSelectionHighlight
-          : "";
-      validUiHighlight = !validSelectionHighlight ? focusedBlock : "";
-      validFocusedTokenFallback = !validSelectionHighlight && !validUiHighlight
-        ? pickFocusedTokenFallback(rootCommentText, entry, entryList)
-        : "";
-    }
-
-    previousSelection = selection;
-
-    const activePos = isSelectionRelevantToPos(selection, dataPos)
-      ? (selection?.from ?? dataPos)
-      : dataPos;
-    const [posBasedHighlight, context] = getContextAtPos(editor, activePos);
-    const selectionHighlight = normalizeSpaces(sliceFromSelection(editor.fullText, selection));
-    const wordAtPos = getWordAtPos(editor.fullText, activePos);
-
-    const validPosHighlight = normalizeSpaces(wordAtPos || posBasedHighlight);
-    
-    console.log("extractComments: Entry analysis", {
-      threadId,
-      dataPos,
-      interactionMode,
-      selection: selection ? { from: selection.from, to: selection.to } : null,
-      activePos,
-      uiHighlight: uiHighlight.substring(0, 50),
-      selectionHighlight: selectionHighlight.substring(0, 50),
-      posBasedHighlight: posBasedHighlight.substring(0, 50),
-      validSelectionHighlight: validSelectionHighlight.substring(0, 50),
-      validUiHighlight: validUiHighlight.substring(0, 50),
-      validFocusedTokenFallback: validFocusedTokenFallback.substring(0, 50),
-      validPosHighlight: validPosHighlight.substring(0, 50)
-    });
-    
-    const highlightedText = validSelectionHighlight || validUiHighlight || validFocusedTokenFallback || validPosHighlight;
-    const highlightSource = validSelectionHighlight
-      ? "selection"
-      : (validUiHighlight ? "focusedBlock" : (validFocusedTokenFallback ? "focusedTokenFallback" : "positionFallback"));
-    const debug = [
-      `source=${highlightSource}`,
-      `interaction=${interactionMode}`,
-      `entryHighlighted=${isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)}`,
-      `dataPos=${dataPos}`,
-      `activePos=${activePos}`,
-      `selectionBefore=${selectionBefore ? `${selectionBefore.from}-${selectionBefore.to}` : "none"}`,
-      `selectionAfter=${selection ? `${selection.from}-${selection.to}` : "none"}`,
-      `selectionChanged=${!selectionsEqual(selection, selectionBefore)}`,
-      `selectionLen=${selectionHighlight.length}`,
-      `focusedLen=${focusedBlock.length}`,
-      `focusedTokenLen=${validFocusedTokenFallback.length}`,
-      `uiLen=${normalizeSpaces(uiHighlight).length}`,
-      `posLen=${validPosHighlight.length}`
-    ].join(" | ");
-    console.log("extractComments: Selected highlighted text", { selected: highlightedText.substring(0, 50) });
-
-    const commentEls = entry.querySelectorAll(".review-panel-comment");
-    let index = 0;
-    for (const commentEl of Array.from(commentEls)) {
-      const body = (commentEl.querySelector(".review-panel-comment-body")?.textContent ?? "").trim();
-      if (!body) {
-        continue;
+    let threadId = "";
+    let dataPos = -1;
+    let uiDetails: UiHighlightDetails = {
+      text: "",
+      source: "not-run",
+      focusCommentCount: 0,
+      focusAnyCount: 0,
+      highlightCommentCount: 0,
+      highlightAnyCount: 0,
+      changeCommentCount: 0,
+      changeAnyCount: 0
+    };
+    let uiHighlight = "";
+    let interactionMode: "hover-click-cycle" | "hover-only" = "hover-click-cycle";
+    let activePos = -1;
+    let entryHighlighted = false;
+    let scrollCheck: ScrollCheck = {
+      method: "not-run",
+      targetLine: -1,
+      visibleStart: -1,
+      visibleEnd: -1,
+      targetVisible: false
+    };
+    try {
+      const expandedInEntry = await expandCollapsedComments(entry);
+      if (expandedInEntry > 0) {
+        console.log("extractComments: Expanded collapsed comments in entry", { expandedInEntry });
       }
 
-      rows.push({
+      threadId = extractThreadId(entry);
+      dataPos = getEntryDataPos(entry);
+      scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
+      interactionMode = "hover-click-cycle";
+      await hoverReviewEntry(entry);
+      await sleep(40);
+      uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos);
+      uiHighlight = uiDetails.text;
+
+      if (!normalizeSpaces(uiHighlight)) {
+        scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
+        interactionMode = "hover-only";
+        await hoverOnlyReviewEntry(entry);
+        await sleep(50);
+        uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos);
+        uiHighlight = uiDetails.text;
+      }
+
+      activePos = dataPos >= 0 && dataPos < editor.fullText.length ? dataPos : -1;
+      let context = "";
+      if (activePos >= 0) {
+        [, context] = getContextAtPos(editor, activePos);
+      }
+      entryHighlighted = isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry);
+
+      const highlightResolution = activePos >= 0
+        ? resolveHighlightAtPos(editor.fullText, activePos, uiDetails)
+        : {
+          text: "",
+          source: "invalidDataPos",
+          confidence: "none"
+        } satisfies HighlightResolution;
+
+      if (scrollCheck.targetLine < 0) {
+        errors.push(
+          `Thread ${threadId || "(no-thread-id)"}: unable to compute target line from data-pos ${dataPos}.`
+        );
+      }
+
+      if (highlightResolution.confidence === "none") {
+        errors.push(
+          `Thread ${threadId || "(no-thread-id)"}: no highlight resolved at data-pos ${dataPos} (uiSource=${uiDetails.source}).`
+        );
+      }
+
+      console.log("extractComments: Entry analysis", {
         threadId,
-        commentIndex: index,
-        author: extractUser(commentEl),
-        date: (commentEl.querySelector(".review-panel-entry-time")?.textContent ?? "").trim(),
-        comment: body,
-        highlightedText: index === 0 ? highlightedText : "",
-        context: index === 0 ? context : "",
-        charPos: index === 0 ? activePos : "",
-        debug: index === 0 ? debug : ""
+        dataPos,
+        interactionMode,
+        activePos,
+        uiHighlight: uiHighlight.substring(0, 50),
+        uiSource: uiDetails.source,
+        resolvedHighlight: highlightResolution.text.substring(0, 50),
+        confidence: highlightResolution.confidence
       });
-      index += 1;
+
+      const highlightedText = highlightResolution.text;
+      const highlightSource = highlightResolution.source;
+      const debug = buildThreadDebugString({
+        highlightSource,
+        highlightConfidence: highlightResolution.confidence,
+        interactionMode,
+        entryHighlighted,
+        dataPos,
+        activePos,
+        uiDetails,
+        uiHighlight,
+        editorSource: editor.source,
+        editorLineCoverage: editor.lineCoverage,
+        threadId,
+        scrollCheck
+      });
+      console.log("extractComments: Selected highlighted text", { selected: highlightedText.substring(0, 50) });
+
+      const commentEls = entry.querySelectorAll(".review-panel-comment");
+      let index = 0;
+      for (const commentEl of Array.from(commentEls)) {
+        const body = (commentEl.querySelector(".review-panel-comment-body")?.textContent ?? "").trim();
+        if (!body) {
+          continue;
+        }
+
+        rows.push({
+          threadId,
+          commentIndex: index,
+          author: extractUser(commentEl),
+          date: (commentEl.querySelector(".review-panel-entry-time")?.textContent ?? "").trim(),
+          comment: body,
+          highlightedText: index === 0 ? highlightedText : "",
+          context: index === 0 ? context : "",
+          charPos: index === 0 ? activePos : "",
+          debug: index === 0 ? debug : ""
+        });
+        index += 1;
+      }
+    } catch (error) {
+      const msg = String(error);
+      const debug = buildThreadDebugString({
+        highlightSource: "error",
+        highlightConfidence: "none",
+        interactionMode,
+        entryHighlighted,
+        dataPos,
+        activePos,
+        uiDetails,
+        uiHighlight,
+        editorSource: editor.source,
+        editorLineCoverage: editor.lineCoverage,
+        threadId: threadId || extractThreadId(entry),
+        scrollCheck
+      });
+      errors.push(`${msg} | ${debug}`);
+      console.warn("extractComments: Skipping thread after strict extraction error", { threadId, error: msg });
     }
   }
 
-  return rows;
+  return {
+    rows,
+    editorFullText: editor.fullText,
+    editorTextSource: editor.source,
+    editorTextLen: editor.fullText.length,
+    errors
+  };
 }
 
 chrome.runtime.onMessage.addListener((
@@ -851,8 +1664,15 @@ chrome.runtime.onMessage.addListener((
   }
 
   extractComments()
-    .then((rows) => {
-      sendResponse({ ok: true, rows });
+    .then((result) => {
+      sendResponse({
+        ok: true,
+        rows: result.rows,
+        editorFullText: result.editorFullText,
+        editorTextSource: result.editorTextSource,
+        editorTextLen: result.editorTextLen,
+        errors: result.errors
+      });
     })
     .catch((error) => {
       sendResponse({ ok: false, error: String(error) });

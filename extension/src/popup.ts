@@ -26,8 +26,7 @@ function toCsv(rows: CommentRow[]): string {
   return [header, ...body].join("\r\n");
 }
 
-function downloadCsv(filename: string, text: string): void {
-  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+function downloadFile(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -63,7 +62,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
 
-      chrome.tabs.sendMessage(tabId, { action: "extract-comments" }, (response: { ok: boolean; rows?: CommentRow[]; error?: string }) => {
+      chrome.tabs.sendMessage(tabId, { action: "extract-comments" }, async (response: { ok: boolean; rows?: CommentRow[]; editorFullText?: string; editorTextSource?: string; editorTextLen?: number; errors?: string[]; error?: string }) => {
         btn.disabled = false;
 
         if (chrome.runtime.lastError) {
@@ -77,15 +76,21 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         const rows = response.rows ?? [];
-        if (!rows.length) {
-          setStatus("No comments found. Is the Review panel open?");
+        const dateStamp = new Date().toISOString().slice(0, 10);
+        const errors = response.errors ?? [];
+
+        if (rows.length === 0) {
+          setStatus("No comments found to export.");
           return;
         }
 
-        const csv = toCsv(rows);
-        const dateStamp = new Date().toISOString().slice(0, 10);
-        downloadCsv(`overleaf-comments-${dateStamp}.csv`, csv);
-        setStatus(`Exported ${rows.length} comment(s).`);
+        const csvBlob = new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" });
+        downloadFile(`overleaf-comments-${dateStamp}.csv`, csvBlob);
+
+        const extra = errors.length > 0
+          ? ` (${errors.length} extraction issue${errors.length === 1 ? "" : "s"} logged in Debug column)`
+          : "";
+        setStatus(`Exported ${rows.length} row${rows.length === 1 ? "" : "s"}${extra}`);
       });
     });
   });

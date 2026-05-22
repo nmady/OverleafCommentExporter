@@ -11,5 +11,8 @@
     "@types/chrome": "^0.0.280",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
   }
 }
