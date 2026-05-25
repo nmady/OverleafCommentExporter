@@ -5,6 +5,7 @@ type EditorLines = {
   fullText: string;
   source: "codemirror-state" | "dom-scroll-harvest" | "dom-visible-lines";
   lineCoverage: number;
+  changeCommentCandidates: HighlightCandidate[];
 };
 
 type DocLike = {
@@ -38,6 +39,7 @@ type ScrollCheck = {
 type UiHighlightDetails = {
   text: string;
   source: string;
+  candidateSummary: string;
   focusCommentCount: number;
   focusAnyCount: number;
   highlightCommentCount: number;
@@ -55,6 +57,18 @@ type ExactCandidateMatch = {
   text: string;
   fragmentCount: number;
   spanLength: number;
+  distance: number;
+};
+
+type NearCandidateMatch = {
+  text: string;
+  fragmentCount: number;
+  spanLength: number;
+  distance: number;
+};
+
+type NearBucketMatch = NearCandidateMatch & {
+  source: string;
 };
 
 type HighlightConfidence = "high" | "medium" | "low" | "none";
@@ -66,7 +80,31 @@ type HighlightResolution = {
 };
 
 function normalizeSpaces(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+  return text;
+}
+
+function hasAnyText(text: string): boolean {
+  return text.length > 0;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasWordBoundaryMatch(text: string, token: string): boolean {
+  const cleanedText = text.toLowerCase();
+  const cleanedToken = token.toLowerCase();
+  if (!cleanedText || !cleanedToken) {
+    return false;
+  }
+
+  // For very short or punctuation-heavy tokens, strict equality is safer than fuzzy matching.
+  if (cleanedToken.length < 2 || !/[a-z0-9]/i.test(cleanedToken)) {
+    return cleanedText === cleanedToken;
+  }
+
+  const regex = new RegExp(`\\b${escapeRegExp(cleanedToken)}\\b`, "i");
+  return regex.test(cleanedText);
 }
 
 type ExtractCommentsRequest = {
@@ -361,7 +399,13 @@ function getEditorTextFromCodeMirrorState(): string | null {
 function buildEditorLinesFromDom(): EditorLines {
   const cmContent = document.querySelector(".cm-content");
   if (!cmContent) {
-    return { lines: [], fullText: "", source: "dom-visible-lines", lineCoverage: 0 };
+    return {
+      lines: [],
+      fullText: "",
+      source: "dom-visible-lines",
+      lineCoverage: 0,
+      changeCommentCandidates: []
+    };
   }
 
   const parts: string[] = [];
@@ -377,8 +421,33 @@ function buildEditorLinesFromDom(): EditorLines {
     lines: buildLinesFromText(fullText),
     fullText,
     source: "dom-visible-lines",
-    lineCoverage: 0
+    lineCoverage: 0,
+    changeCommentCandidates: getUniqueCandidatesForSelector(".cm-content .ol-cm-change-c")
   };
+}
+
+function collectCandidatesForSelector(
+  root: ParentNode,
+  selector: string,
+  acc: Map<string, HighlightCandidate>
+): void {
+  const rawNodes = Array.from(root.querySelectorAll(selector));
+  const nodes = rawNodes.filter((node) => {
+    const parentMatch = (node.parentElement?.closest(selector) as Element | null);
+    return parentMatch == null || parentMatch === node;
+  });
+
+  for (const node of nodes) {
+    const text = node.textContent ?? "";
+    if (!hasAnyText(text) || acc.has(text)) {
+      continue;
+    }
+    const fragments = getTextFragments(node as Element);
+    acc.set(text, {
+      text,
+      fragments: fragments.length ? fragments : [text]
+    });
+  }
 }
 
 function parseLineNumber(raw: string): number | null {
@@ -445,6 +514,7 @@ async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
 
   const originalTop = scroller.scrollTop;
   const acc = new Map<number, string>();
+  const changeCommentCandidates = new Map<string, HighlightCandidate>();
   const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   const step = Math.max(60, Math.floor(scroller.clientHeight * 0.8));
 
@@ -454,6 +524,7 @@ async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
   let guard = 0;
   while (guard < 3000) {
     captureVisibleLinesWithNumbers(scroller, acc);
+    collectCandidatesForSelector(scroller, ".cm-content .ol-cm-change-c", changeCommentCandidates);
 
     const current = scroller.scrollTop;
     if (current >= maxTop - 1) {
@@ -473,10 +544,18 @@ async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
   scroller.scrollTop = maxTop;
   await sleep(25);
   captureVisibleLinesWithNumbers(scroller, acc);
+  collectCandidatesForSelector(scroller, ".cm-content .ol-cm-change-c", changeCommentCandidates);
   scroller.scrollTop = originalTop;
 
   if (!acc.size) {
-    return buildEditorLinesFromDom();
+    const fallback = buildEditorLinesFromDom();
+    if (changeCommentCandidates.size) {
+      return {
+        ...fallback,
+        changeCommentCandidates: Array.from(changeCommentCandidates.values())
+      };
+    }
+    return fallback;
   }
 
   const maxLineNo = Math.max(...Array.from(acc.keys()));
@@ -499,19 +578,22 @@ async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
     lines: buildLinesFromText(fullText),
     fullText,
     source: "dom-scroll-harvest",
-    lineCoverage: coverage
+    lineCoverage: coverage,
+    changeCommentCandidates: Array.from(changeCommentCandidates.values())
   };
 }
 
 async function buildEditorLines(): Promise<EditorLines> {
   const fullTextFromState = getEditorTextFromCodeMirrorState();
   if (fullTextFromState != null) {
+    const scrollHarvested = await buildEditorLinesByScrollingDom();
     console.log("buildEditorLines: Using CodeMirror state", { textLen: fullTextFromState.length, sample: fullTextFromState.substring(0, 100) });
     return {
       lines: buildLinesFromText(fullTextFromState),
       fullText: fullTextFromState.replace(/\r\n?/g, "\n"),
       source: "codemirror-state",
-      lineCoverage: 1
+      lineCoverage: 1,
+      changeCommentCandidates: scrollHarvested.changeCommentCandidates
     };
   }
 
@@ -531,8 +613,8 @@ function getTextFragments(node: Element): string[] {
 
   let current = walker.nextNode();
   while (current) {
-    const text = normalizeSpaces(current.textContent ?? "");
-    if (text) {
+    const text = current.textContent ?? "";
+    if (hasAnyText(text)) {
       fragments.push(text);
     }
     current = walker.nextNode();
@@ -542,13 +624,17 @@ function getTextFragments(node: Element): string[] {
 }
 
 function getUniqueCandidatesForSelector(selector: string): HighlightCandidate[] {
-  const nodes = Array.from(document.querySelectorAll(selector));
+  const rawNodes = Array.from(document.querySelectorAll(selector));
+  const nodes = rawNodes.filter((node) => {
+    const parentMatch = (node.parentElement?.closest(selector) as Element | null);
+    return parentMatch == null || parentMatch === node;
+  });
   const seen = new Set<string>();
   const candidates: HighlightCandidate[] = [];
 
   for (const node of nodes) {
-    const text = normalizeSpaces(node.textContent ?? "");
-    if (!text || seen.has(text)) {
+    const text = node.textContent ?? "";
+    if (!hasAnyText(text) || seen.has(text)) {
       continue;
     }
     seen.add(text);
@@ -562,6 +648,235 @@ function getUniqueCandidatesForSelector(selector: string): HighlightCandidate[] 
   return candidates;
 }
 
+function mergeCandidateLists(
+  primary: HighlightCandidate[],
+  fallback: HighlightCandidate[]
+): HighlightCandidate[] {
+  if (!fallback.length) {
+    return primary;
+  }
+
+  const seen = new Set(primary.map((candidate) => candidate.text));
+  const merged = [...primary];
+  for (const candidate of fallback) {
+    if (seen.has(candidate.text)) {
+      continue;
+    }
+    seen.add(candidate.text);
+    merged.push(candidate);
+  }
+  return merged;
+}
+
+function getOrderedHighlightTextsForSelector(selector: string): string[] {
+  const nodes = Array.from(document.querySelectorAll(selector));
+  const texts: string[] = [];
+
+  for (const node of nodes) {
+    const text = (node as Element).textContent ?? "";
+    if (hasAnyText(text)) {
+      texts.push(text);
+    }
+  }
+
+  return texts;
+}
+
+type LocalContextAnchor = {
+  context: string;
+  contextStart: number;
+  contextEnd: number;
+  localDataPos: number;
+};
+
+function getLocalDataPosInContext(fullText: string, dataPos: number, contextRadius = 900): LocalContextAnchor | null {
+  if (!Number.isFinite(dataPos) || dataPos < 0 || dataPos >= fullText.length) {
+    return null;
+  }
+
+  const contextStart = Math.max(0, dataPos - contextRadius);
+  const contextEnd = Math.min(fullText.length, dataPos + contextRadius);
+  const context = fullText.slice(contextStart, contextEnd);
+  return {
+    context,
+    contextStart,
+    contextEnd,
+    localDataPos: dataPos - contextStart
+  };
+}
+
+type IndexedSpanText = {
+  start: number;
+  end: number;
+};
+
+function indexSelectorTextsInFullText(fullText: string, selector: string): IndexedSpanText[] {
+  const nodes = Array.from(document.querySelectorAll(selector));
+  const indexed: IndexedSpanText[] = [];
+  let cursor = 0;
+
+  for (const node of nodes) {
+    const text = (node as Element).textContent ?? "";
+    if (!hasAnyText(text)) {
+      continue;
+    }
+
+    let idx = fullText.indexOf(text, cursor);
+    if (idx < 0) {
+      idx = fullText.indexOf(text);
+    }
+    if (idx < 0) {
+      continue;
+    }
+
+    const end = idx + text.length;
+    indexed.push({ start: idx, end });
+    cursor = end;
+  }
+
+  return indexed;
+}
+
+function pickAnchoredSpanByLocalContext(fullText: string, dataPos: number, selector: string): string {
+  const localAnchor = getLocalDataPosInContext(fullText, dataPos, 900);
+  if (!localAnchor) {
+    return "";
+  }
+  const { contextStart, contextEnd, localDataPos } = localAnchor;
+  const indexedSpans = indexSelectorTextsInFullText(fullText, selector)
+    .filter((span) => span.end > contextStart && span.start < contextEnd);
+
+  if (!indexedSpans.length) {
+    return "";
+  }
+
+  let anchorIndex = -1;
+  for (let i = 0; i < indexedSpans.length; i += 1) {
+    const span = indexedSpans[i];
+    // Strict anchoring: highlighted span must begin exactly at dataPos.
+    if (span.start === dataPos) {
+      anchorIndex = i;
+      break;
+    }
+  }
+
+  if (anchorIndex < 0) {
+    return "";
+  }
+
+  let start = indexedSpans[anchorIndex].start;
+  let end = indexedSpans[anchorIndex].end;
+  const maxGap = 24;
+
+  for (let i = anchorIndex + 1; i < indexedSpans.length; i += 1) {
+    const next = indexedSpans[i];
+    if (next.start > contextEnd + 40) {
+      break;
+    }
+
+    const gap = next.start - end;
+    if (gap < 0) {
+      if (next.end > end) {
+        end = next.end;
+      }
+      continue;
+    }
+
+    if (gap > maxGap) {
+      break;
+    }
+
+    end = next.end;
+  }
+
+  const resolved = fullText.slice(start, end);
+  if (!resolved) {
+    return "";
+  }
+
+  return resolved;
+}
+
+function pickAnchoredSpanChainAtPos(fullText: string, dataPos: number, selector: string): string {
+  const localAnchor = getLocalDataPosInContext(fullText, dataPos, 1200);
+  if (!localAnchor) {
+    return "";
+  }
+  const context = localAnchor.context.toLowerCase();
+  const localDataPos = localAnchor.localDataPos;
+  const contextStart = localAnchor.contextStart;
+  const ordered = getOrderedHighlightTextsForSelector(selector);
+  if (!ordered.length) {
+    return "";
+  }
+
+  let bestText = "";
+  let bestIdx = -1;
+  let bestNode = -1;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < ordered.length; i += 1) {
+    const text = ordered[i];
+    if (!hasAnyText(text)) {
+      continue;
+    }
+
+    const idx = fullText.indexOf(text, Math.max(0, dataPos));
+    if (idx !== dataPos) {
+      continue;
+    }
+
+    const lower = text.toLowerCase();
+    const contextMatch = !!context && context.includes(lower);
+    const localStart = idx - contextStart;
+    const localDist = Math.abs(localStart - localDataPos);
+
+    const score =
+      (contextMatch ? 220 : 0)
+      + Math.min(text.length, 80)
+      - localDist;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestText = text;
+      bestIdx = idx;
+      bestNode = i;
+    }
+  }
+
+  if (!bestText || bestIdx < 0 || bestNode < 0) {
+    // Fallback path: anchor to the token at dataPos and grow through adjacent DOM spans.
+    return pickAnchoredSpanByLocalContext(fullText, dataPos, selector);
+  }
+
+  let resolved = bestText;
+  let cursor = bestIdx + bestText.length;
+  const maxChainSpan = 1500;
+
+  // Walk forward in DOM highlight order to infer where the highlighted run ends.
+  for (let i = bestNode + 1; i < ordered.length; i += 1) {
+    const next = ordered[i];
+    if (!hasAnyText(next)) {
+      continue;
+    }
+
+    const nextIdx = fullText.indexOf(next, Math.max(0, cursor));
+    if (nextIdx < 0 || nextIdx < cursor) {
+      continue;
+    }
+
+    if (nextIdx - bestIdx > maxChainSpan) {
+      break;
+    }
+
+    const join = fullText.slice(cursor, nextIdx);
+    resolved = `${resolved}${join}${next}`;
+    cursor = nextIdx + next.length;
+  }
+
+  return resolved;
+}
+
 function getExactCandidateMatchAtPos(
   fullText: string,
   dataPos: number,
@@ -571,44 +886,46 @@ function getExactCandidateMatchAtPos(
     return null;
   }
 
-  let cursor = dataPos;
-  let foundCount = 0;
-  let firstIdx = -1;
-  let lastEnd = -1;
+  if (!candidate.fragments.length) {
+    return null;
+  }
 
-  for (let i = 0; i < candidate.fragments.length; i += 1) {
+  const firstFragment = candidate.fragments[0];
+  const firstIdx = dataPos;
+  if (!fullText.startsWith(firstFragment, firstIdx)) {
+    return null;
+  }
+
+  let cursor = firstIdx + firstFragment.length;
+  let foundCount = 1;
+  let lastEnd = cursor;
+
+  for (let i = 1; i < candidate.fragments.length; i += 1) {
     const fragment = candidate.fragments[i];
     const idx = fullText.indexOf(fragment, cursor);
     if (idx < 0) {
       return null;
     }
 
-    if (i === 0 && idx !== dataPos) {
-      return null;
-    }
-
-    if (firstIdx < 0) {
-      firstIdx = idx;
-    }
     lastEnd = idx + fragment.length;
     cursor = idx + fragment.length;
     foundCount += 1;
   }
 
-  if (foundCount === 0 || firstIdx !== dataPos || lastEnd < 0) {
+  if (foundCount === 0 || lastEnd < 0) {
     return null;
   }
 
   return {
     text: candidate.text,
     fragmentCount: foundCount,
-    spanLength: lastEnd - firstIdx
+    spanLength: lastEnd - firstIdx,
+    distance: 0
   };
 }
 
 function pickExactCandidateAtPos(fullText: string, dataPos: number, candidates: HighlightCandidate[]): string {
   let best: ExactCandidateMatch | null = null;
-  let bestSpanLength = Number.POSITIVE_INFINITY;
 
   for (const candidate of candidates) {
     const match = getExactCandidateMatchAtPos(fullText, dataPos, candidate);
@@ -619,26 +936,254 @@ function pickExactCandidateAtPos(fullText: string, dataPos: number, candidates: 
     const shouldReplace =
       !best
       || match.fragmentCount > best.fragmentCount
-      || (match.fragmentCount === best.fragmentCount && match.spanLength < bestSpanLength);
+      || (match.fragmentCount === best.fragmentCount && match.distance < best.distance)
+      || (match.fragmentCount === best.fragmentCount
+        && match.distance === best.distance
+        && match.spanLength < best.spanLength);
 
     if (shouldReplace) {
       best = match;
-      bestSpanLength = match.spanLength;
     }
   }
 
   return best?.text ?? "";
 }
 
-function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighlightDetails {
+function findClosestIndexInWindow(fullText: string, fragment: string, dataPos: number, window: number): number {
+  const minStart = Math.max(0, dataPos - window);
+  const maxStart = Math.min(fullText.length - fragment.length, dataPos + window);
+  if (maxStart < minStart) {
+    return -1;
+  }
+
+  let bestIdx = -1;
+  let bestDist = Number.POSITIVE_INFINITY;
+  let searchFrom = minStart;
+
+  while (searchFrom <= maxStart) {
+    const idx = fullText.indexOf(fragment, searchFrom);
+    if (idx < 0 || idx > maxStart) {
+      break;
+    }
+
+    const dist = Math.abs(idx - dataPos);
+    if (dist < bestDist || (dist === bestDist && idx < bestIdx)) {
+      bestIdx = idx;
+      bestDist = dist;
+    }
+
+    searchFrom = idx + 1;
+  }
+
+  return bestIdx;
+}
+
+function getForwardNonWhitespaceAnchor(fullText: string, dataPos: number, maxSkip = 3): number {
+  if (dataPos < 0 || dataPos >= fullText.length) {
+    return dataPos;
+  }
+
+  let anchor = dataPos;
+  let skipped = 0;
+  while (anchor < fullText.length && skipped < maxSkip && isWhitespaceChar(fullText[anchor])) {
+    anchor += 1;
+    skipped += 1;
+  }
+  return anchor;
+}
+
+function getNearCandidateMatchAtPos(
+  fullText: string,
+  dataPos: number,
+  candidate: HighlightCandidate,
+  window = 3
+): NearCandidateMatch | null {
+  // Near matching is intentionally disabled: highlights must start exactly at dataPos.
+  void fullText;
+  void dataPos;
+  void candidate;
+  void window;
+  return null;
+}
+
+function pickNearCandidateAtPos(
+  fullText: string,
+  dataPos: number,
+  candidates: HighlightCandidate[],
+  window = 3
+): string {
+  let best: NearCandidateMatch | null = null;
+
+  for (const candidate of candidates) {
+    const match = getNearCandidateMatchAtPos(fullText, dataPos, candidate, window);
+    if (!match) {
+      continue;
+    }
+
+    const shouldReplace =
+      !best
+      || match.distance < best.distance
+      || (match.distance === best.distance && match.fragmentCount > best.fragmentCount)
+      || (match.distance === best.distance
+        && match.fragmentCount === best.fragmentCount
+        && match.spanLength < best.spanLength);
+
+    if (shouldReplace) {
+      best = match;
+    }
+  }
+
+  return best?.text ?? "";
+}
+
+function pickBestNearBucketMatchAtPos(
+  fullText: string,
+  dataPos: number,
+  buckets: Array<{ source: string; candidates: HighlightCandidate[] }>,
+  window = 3
+): NearBucketMatch | null {
+  let best: NearBucketMatch | null = null;
+
+  const sourcePenalty = (source: string): number => {
+    // Focus buckets can reflect stale UI state; prefer explicit highlight/change buckets when similarly close.
+    if (source === "focusComment" || source === "focusAny") {
+      return 1;
+    }
+    return 0;
+  };
+
+  for (const bucket of buckets) {
+    for (const candidate of bucket.candidates) {
+      const match = getNearCandidateMatchAtPos(fullText, dataPos, candidate, window);
+      if (!match) {
+        continue;
+      }
+
+      const adjustedDistance = match.distance + sourcePenalty(bucket.source);
+      const bestAdjustedDistance = best ? best.distance + sourcePenalty(best.source) : Number.POSITIVE_INFINITY;
+
+      const shouldReplace =
+        !best
+        || adjustedDistance < bestAdjustedDistance
+        || (adjustedDistance === bestAdjustedDistance && match.fragmentCount > best.fragmentCount)
+        || (adjustedDistance === bestAdjustedDistance
+          && match.fragmentCount === best.fragmentCount
+          && match.spanLength < best.spanLength);
+
+      if (shouldReplace) {
+        best = {
+          ...match,
+          source: bucket.source
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+function combineCandidateTextsWithOriginalGaps(
+  fullText: string,
+  candidates: HighlightCandidate[],
+  dataPos = -1
+): string {
+  const texts = candidates
+    .map((candidate) => candidate.text)
+    .filter((text) => hasAnyText(text));
+
+  if (!texts.length) {
+    return "";
+  }
+
+  let resolved = texts[0];
+  let cursor = -1;
+  if (dataPos >= 0) {
+    if (fullText.startsWith(texts[0], dataPos)) {
+      cursor = dataPos;
+    }
+  } else {
+    cursor = fullText.indexOf(texts[0]);
+  }
+  if (cursor >= 0) {
+    cursor += texts[0].length;
+  }
+
+  for (let i = 1; i < texts.length; i += 1) {
+    const text = texts[i];
+    if (cursor >= 0) {
+      const idx = fullText.indexOf(text, cursor);
+      if (idx >= cursor) {
+        resolved += fullText.slice(cursor, idx) + text;
+        cursor = idx + text.length;
+        continue;
+      }
+    }
+
+    resolved += text;
+    cursor = -1;
+  }
+
+  return resolved;
+}
+
+function getFocusedHighlightDetails(
+  fullText: string,
+  dataPos: number,
+  globalChangeCommentCandidates: HighlightCandidate[] = []
+): UiHighlightDetails {
+  const highlightComment = getUniqueCandidatesForSelector(
+    ".cm-content .ol-cm-change-highlight-c"
+  );
+  const buildCandidateSummary = (buckets: Array<[string, HighlightCandidate[]]>): string => {
+
+    const entries: Array<{ label: string; text: string; dist: number }> = [];
+    for (const [label, list] of buckets) {
+      for (const c of list) {
+        const text = c.text;
+        if (!hasAnyText(text)) {
+          continue;
+        }
+        const idx = fullText.indexOf(text, Math.max(0, dataPos - 80));
+        const fallbackIdx = idx >= 0 ? idx : fullText.indexOf(text);
+        const dist = fallbackIdx >= 0 ? Math.abs(fallbackIdx - dataPos) : 999999;
+        entries.push({ label, text, dist });
+      }
+    }
+
+    entries.sort((a, b) => a.dist - b.dist || a.text.length - b.text.length);
+    const top = entries.slice(0, 8).map((e) => {
+      const short = e.text.length > 36 ? `${e.text.slice(0, 36)}...` : e.text;
+      return `${e.label}@${e.dist}:${short}`;
+    });
+    return top.join(" || ");
+  };
+
+  const hasHoveredReviewEntry =
+    document.querySelector(".review-panel-entry-hover") != null;
+  const combinedHoverHighlight = combineCandidateTextsWithOriginalGaps(fullText, highlightComment, dataPos);
+  const hoverCandidateSummary = buildCandidateSummary([
+    ["highlightComment", highlightComment]
+  ]);
+
+  if (hasHoveredReviewEntry && hasAnyText(combinedHoverHighlight)) {
+    return {
+      text: combinedHoverHighlight,
+      source: "hoverCommentGlobal",
+      candidateSummary: hoverCandidateSummary,
+      focusCommentCount: 0,
+      focusAnyCount: 0,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: 0,
+      changeCommentCount: 0,
+      changeAnyCount: 0
+    };
+  }
+
   const focusComment = getUniqueCandidatesForSelector(
     ".cm-content .ol-cm-change-focus .ol-cm-change-c, .cm-content .ol-cm-change-focus .ol-cm-change-highlight-c"
   );
   const focusAny = getUniqueCandidatesForSelector(
     ".cm-content .ol-cm-change-focus .ol-cm-change"
-  );
-  const highlightComment = getUniqueCandidatesForSelector(
-    ".cm-content .ol-cm-change-highlight-c"
   );
   const highlightAny = getUniqueCandidatesForSelector(
     ".cm-content .ol-cm-change-highlight"
@@ -646,9 +1191,19 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
   const changeComment = getUniqueCandidatesForSelector(
     ".cm-content .ol-cm-change-c"
   );
+  const changeCommentMerged = mergeCandidateLists(changeComment, globalChangeCommentCandidates);
   const changeAny = getUniqueCandidatesForSelector(
     ".cm-content .ol-cm-change"
   );
+  const candidateSummary = buildCandidateSummary([
+    ["focusComment", focusComment],
+    ["highlightComment", highlightComment],
+    ["changeComment", changeComment],
+    ["changeCommentGlobal", changeCommentMerged],
+    ["focusAny", focusAny],
+    ["highlightAny", highlightAny],
+    ["changeAny", changeAny]
+  ]);
 
   console.log("getFocusedHighlightDetails: bucket counts", {
     focusComment: focusComment.length,
@@ -656,6 +1211,7 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
     highlightComment: highlightComment.length,
     highlightAny: highlightAny.length,
     changeComment: changeComment.length,
+    changeCommentGlobal: changeCommentMerged.length,
     changeAny: changeAny.length
   });
 
@@ -664,11 +1220,53 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
     { source: "highlightComment", candidates: highlightComment },
     { source: "changeComment", candidates: changeComment }
   ];
+  const anyBuckets: Array<{ source: string; candidates: HighlightCandidate[] }> = [
+    { source: "focusAny", candidates: focusAny },
+    { source: "highlightAny", candidates: highlightAny },
+    { source: "changeAny", candidates: changeAny }
+  ];
+  const spanBuckets: Array<{ source: string; selector: string }> = [
+    {
+      source: "focusComment",
+      selector: ".cm-content .ol-cm-change-focus .ol-cm-change-c, .cm-content .ol-cm-change-focus .ol-cm-change-highlight-c"
+    },
+    {
+      source: "highlightComment",
+      selector: ".cm-content .ol-cm-change-highlight-c"
+    },
+    {
+      source: "changeComment",
+      selector: ".cm-content .ol-cm-change-c"
+    },
+    {
+      source: "focusAny",
+      selector: ".cm-content .ol-cm-change-focus .ol-cm-change"
+    },
+    {
+      source: "highlightAny",
+      selector: ".cm-content .ol-cm-change-highlight"
+    },
+    {
+      source: "changeAny",
+      selector: ".cm-content .ol-cm-change"
+    }
+  ];
+  const commentSpanBuckets = spanBuckets.filter((bucket) =>
+    bucket.source === "focusComment"
+    || bucket.source === "highlightComment"
+    || bucket.source === "changeComment"
+  );
+  const anySpanBuckets = spanBuckets.filter((bucket) =>
+    bucket.source === "focusAny"
+    || bucket.source === "highlightAny"
+    || bucket.source === "changeAny"
+  );
 
   if (dataPos < 0 || dataPos >= fullText.length) {
     return {
       text: "",
       source: "invalidDataPos",
+      candidateSummary,
       focusCommentCount: focusComment.length,
       focusAnyCount: focusAny.length,
       highlightCommentCount: highlightComment.length,
@@ -678,12 +1276,113 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
     };
   }
 
-  for (const bucket of commentBuckets) {
+  // 1) Exact focus-comment match.
+  const exactFocusComment = pickExactCandidateAtPos(fullText, dataPos, focusComment);
+  if (exactFocusComment) {
+    return {
+      text: exactFocusComment,
+      source: "focusComment",
+      candidateSummary,
+      focusCommentCount: focusComment.length,
+      focusAnyCount: focusAny.length,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: highlightAny.length,
+      changeCommentCount: changeComment.length,
+      changeAnyCount: changeAny.length
+    };
+  }
+
+  // 1b) Exact anchored span reconstruction on comment buckets.
+  for (const bucket of commentSpanBuckets) {
+    const text = pickAnchoredSpanChainAtPos(fullText, dataPos, bucket.selector);
+    if (text) {
+      return {
+        text,
+        source: `${bucket.source}AnchoredSpan`,
+        candidateSummary,
+        focusCommentCount: focusComment.length,
+        focusAnyCount: focusAny.length,
+        highlightCommentCount: highlightComment.length,
+        highlightAnyCount: highlightAny.length,
+        changeCommentCount: changeComment.length,
+        changeAnyCount: changeAny.length
+      };
+    }
+  }
+
+  // 2) Exact highlight-comment match.
+  const exactHighlightComment = pickExactCandidateAtPos(fullText, dataPos, highlightComment);
+  if (exactHighlightComment) {
+    return {
+      text: exactHighlightComment,
+      source: "highlightComment",
+      candidateSummary,
+      focusCommentCount: focusComment.length,
+      focusAnyCount: focusAny.length,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: highlightAny.length,
+      changeCommentCount: changeComment.length,
+      changeAnyCount: changeAny.length
+    };
+  }
+
+  // 3) Exact change-comment match.
+  const exactChangeComment = pickExactCandidateAtPos(fullText, dataPos, changeComment);
+  if (exactChangeComment) {
+    return {
+      text: exactChangeComment,
+      source: "changeComment",
+      candidateSummary,
+      focusCommentCount: focusComment.length,
+      focusAnyCount: focusAny.length,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: highlightAny.length,
+      changeCommentCount: changeComment.length,
+      changeAnyCount: changeAny.length
+    };
+  }
+
+  // 3b) Exact change-comment match from global scroll-time pool.
+  const exactChangeCommentGlobal = pickExactCandidateAtPos(fullText, dataPos, changeCommentMerged);
+  if (exactChangeCommentGlobal) {
+    return {
+      text: exactChangeCommentGlobal,
+      source: "changeCommentGlobalPool",
+      candidateSummary,
+      focusCommentCount: focusComment.length,
+      focusAnyCount: focusAny.length,
+      highlightCommentCount: highlightComment.length,
+      highlightAnyCount: highlightAny.length,
+      changeCommentCount: changeComment.length,
+      changeAnyCount: changeAny.length
+    };
+  }
+
+  // 6) Broader any-bucket matches after comment-bucket path is exhausted.
+  for (const bucket of anyBuckets) {
     const text = pickExactCandidateAtPos(fullText, dataPos, bucket.candidates);
     if (text) {
       return {
         text,
         source: bucket.source,
+        candidateSummary,
+        focusCommentCount: focusComment.length,
+        focusAnyCount: focusAny.length,
+        highlightCommentCount: highlightComment.length,
+        highlightAnyCount: highlightAny.length,
+        changeCommentCount: changeComment.length,
+        changeAnyCount: changeAny.length
+      };
+    }
+  }
+
+  for (const bucket of anySpanBuckets) {
+    const text = pickAnchoredSpanChainAtPos(fullText, dataPos, bucket.selector);
+    if (text) {
+      return {
+        text,
+        source: `${bucket.source}AnchoredSpan`,
+        candidateSummary,
         focusCommentCount: focusComment.length,
         focusAnyCount: focusAny.length,
         highlightCommentCount: highlightComment.length,
@@ -697,6 +1396,7 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
   return {
     text: "",
     source: "none",
+    candidateSummary,
     focusCommentCount: focusComment.length,
     focusAnyCount: focusAny.length,
     highlightCommentCount: highlightComment.length,
@@ -706,13 +1406,29 @@ function getFocusedHighlightDetails(fullText: string, dataPos: number): UiHighli
   };
 }
 
+function isEntryHovered(entry: Element): boolean {
+  return entry.classList.contains("review-panel-entry-hover");
+}
+
 function isEntryHighlighted(entry: Element): boolean {
   return entry.classList.contains("review-panel-entry-highlighted");
+}
+
+function isCurrentHoveredEntry(entry: Element): boolean {
+  const current = document.querySelector(".review-panel-entry-hover");
+  return current === entry;
 }
 
 function isCurrentHighlightedEntry(entry: Element): boolean {
   const current = document.querySelector(".review-panel-entry-highlighted");
   return current === entry;
+}
+
+function isEntryActive(entry: Element): boolean {
+  return isCurrentHoveredEntry(entry)
+    || isEntryHovered(entry)
+    || isCurrentHighlightedEntry(entry)
+    || isEntryHighlighted(entry);
 }
 
 function dispatchMouseEvent(target: HTMLElement, type: string): void {
@@ -757,7 +1473,7 @@ async function hoverReviewEntry(entry: Element): Promise<void> {
     dispatchMouseEvent(target, "mousemove");
     await sleep(90);
 
-    if (isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)) {
+    if (isEntryActive(entry)) {
       break;
     }
   }
@@ -791,7 +1507,7 @@ async function hoverOnlyReviewEntry(entry: Element): Promise<void> {
     dispatchMouseEvent(target, "mousemove");
     await sleep(100);
 
-    if (isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry)) {
+    if (isEntryActive(entry)) {
       break;
     }
   }
@@ -1202,25 +1918,6 @@ function findNearestNonWhitespaceIndex(fullText: string, pos: number, maxDistanc
   return -1;
 }
 
-function getTokenSpanAt(fullText: string, pos: number): [number, number] | null {
-  const center = findNearestNonWhitespaceIndex(fullText, pos);
-  if (center < 0 || isPhraseBoundaryChar(fullText[center])) {
-    return null;
-  }
-
-  let start = center;
-  while (start > 0 && !isWhitespaceChar(fullText[start - 1]) && !isPhraseBoundaryChar(fullText[start - 1])) {
-    start -= 1;
-  }
-
-  let end = center + 1;
-  while (end < fullText.length && !isWhitespaceChar(fullText[end]) && !isPhraseBoundaryChar(fullText[end])) {
-    end += 1;
-  }
-
-  return end > start ? [start, end] : null;
-}
-
 function findPrevTokenSpan(fullText: string, fromExclusive: number): [number, number] | null {
   let i = fromExclusive - 1;
   while (i >= 0 && isWhitespaceChar(fullText[i])) {
@@ -1256,12 +1953,21 @@ function findNextTokenSpan(fullText: string, fromInclusive: number): [number, nu
 }
 
 function getPhraseAtPos(fullText: string, pos: number, maxTokens = 10, maxChars = 140): string {
-  const tokenSpan = getTokenSpanAt(fullText, pos);
-  if (!tokenSpan) {
+  const center = findNearestNonWhitespaceIndex(fullText, pos);
+  if (center < 0 || isPhraseBoundaryChar(fullText[center])) {
     return "";
   }
 
-  let [start, end] = tokenSpan;
+  let start = center;
+  while (start > 0 && !isWhitespaceChar(fullText[start - 1]) && !isPhraseBoundaryChar(fullText[start - 1])) {
+    start -= 1;
+  }
+
+  let end = center + 1;
+  while (end < fullText.length && !isWhitespaceChar(fullText[end]) && !isPhraseBoundaryChar(fullText[end])) {
+    end += 1;
+  }
+
   let tokenCount = 1;
 
   while (tokenCount < maxTokens) {
@@ -1290,12 +1996,12 @@ function getPhraseAtPos(fullText: string, pos: number, maxTokens = 10, maxChars 
     tokenCount += 1;
   }
 
-  return normalizeSpaces(fullText.slice(start, end));
+  return fullText.slice(start, end);
 }
 
 function reconcileUiHighlightWithPhrase(fullText: string, dataPos: number, uiHighlight: string): string {
-  const ui = normalizeSpaces(uiHighlight);
-  if (!ui) {
+  const ui = uiHighlight;
+  if (!hasAnyText(ui)) {
     return "";
   }
 
@@ -1312,14 +2018,25 @@ function reconcileUiHighlightWithPhrase(fullText: string, dataPos: number, uiHig
   return phrase.toLowerCase().startsWith(ui.toLowerCase()) ? phrase : ui;
 }
 
-function getSelectorForUiSource(source: string): string | null {
-  if (source === "focusComment") {
+function getSelectorForUiSource(source: string, baseHighlight = ""): string | null {
+  const canonicalSource = source.replace(/(Near|AnchoredSpan|Closest|Global)$/, "");
+
+  if (canonicalSource === "focusComment") {
+    const shortBase = baseHighlight.length <= 6;
+    if (shortBase) {
+      return [
+        ".cm-content .ol-cm-change-focus .ol-cm-change-c",
+        ".cm-content .ol-cm-change-focus .ol-cm-change-highlight-c",
+        ".cm-content .ol-cm-change-highlight-c",
+        ".cm-content .ol-cm-change-c"
+      ].join(", ");
+    }
     return ".cm-content .ol-cm-change-focus .ol-cm-change-c, .cm-content .ol-cm-change-focus .ol-cm-change-highlight-c";
   }
-  if (source === "highlightComment") {
+  if (canonicalSource === "highlightComment") {
     return ".cm-content .ol-cm-change-highlight-c";
   }
-  if (source === "changeComment") {
+  if (canonicalSource === "changeComment") {
     return ".cm-content .ol-cm-change-c";
   }
   return null;
@@ -1331,24 +2048,26 @@ function extendUiHighlightAcrossAdjacentCandidates(
   uiHighlight: string,
   uiSource: string
 ): string {
-  const base = normalizeSpaces(uiHighlight);
-  if (!base || dataPos < 0 || dataPos >= fullText.length) {
+  const base = uiHighlight;
+  if (!hasAnyText(base) || dataPos < 0 || dataPos >= fullText.length) {
     return base;
   }
 
-  const selector = getSelectorForUiSource(uiSource);
+  const selector = getSelectorForUiSource(uiSource, base);
   if (!selector) {
     return base;
   }
 
   const candidates = getUniqueCandidatesForSelector(selector)
-    .map((c) => normalizeSpaces(c.text))
+    .map((c) => c.text)
     .filter((t) => !!t);
   if (candidates.length < 2) {
     return base;
   }
 
-  let cursor = dataPos + base.length;
+  const anchoredBaseIdx = fullText.indexOf(base, Math.max(0, dataPos - 4));
+  const baseIdx = anchoredBaseIdx >= 0 ? anchoredBaseIdx : fullText.indexOf(base);
+  let cursor = (baseIdx >= 0 ? baseIdx : dataPos) + base.length;
   let resolved = base;
   const used = new Set<string>([base]);
 
@@ -1383,7 +2102,7 @@ function extendUiHighlightAcrossAdjacentCandidates(
     }
 
     const join = fullText.slice(cursor, bestIdx);
-    resolved = normalizeSpaces(`${resolved} ${join} ${bestText}`);
+    resolved = `${resolved}${join}${bestText}`;
     cursor = bestIdx + bestText.length;
     used.add(bestText);
   }
@@ -1392,29 +2111,44 @@ function extendUiHighlightAcrossAdjacentCandidates(
 }
 
 function resolveHighlightAtPos(fullText: string, dataPos: number, uiDetails: UiHighlightDetails): HighlightResolution {
-  const uiHighlight = normalizeSpaces(uiDetails.text);
+  const uiHighlight = uiDetails.text;
+  const phrase = getPhraseAtPos(fullText, dataPos, 10, 140);
+  const isWeakUiSource = /Closest$/.test(uiDetails.source);
+  const canonicalUiSource = uiDetails.source.replace(/(Near|AnchoredSpan|Closest|Global)$/g, "");
+  const isExactCommentLikeSource =
+    canonicalUiSource === "focusComment"
+    || canonicalUiSource === "highlightComment"
+    || canonicalUiSource === "changeComment"
+    || canonicalUiSource === "changeCommentGlobalPool";
   if (uiHighlight) {
+    if (isWeakUiSource && phrase && phrase !== uiHighlight) {
+      const phraseTokenCount = phrase.trim().split(/\s+/).filter(Boolean).length;
+      if (phrase.length > uiHighlight.length && (phraseTokenCount >= 1 || phrase.length >= 3)) {
+        return {
+          text: phrase,
+          source: `uiHighlightFallbackPhrase:${uiDetails.source}`,
+          confidence: "medium"
+        };
+      }
+    }
+
     const multilineExtended = extendUiHighlightAcrossAdjacentCandidates(fullText, dataPos, uiHighlight, uiDetails.source);
-    const reconciled = reconcileUiHighlightWithPhrase(fullText, dataPos, multilineExtended);
+    const reconciled = isExactCommentLikeSource
+      ? multilineExtended
+      : reconcileUiHighlightWithPhrase(fullText, dataPos, multilineExtended);
+    const reconcileDecision = isExactCommentLikeSource
+      ? "reconcileSkippedExactSource"
+      : (reconciled !== multilineExtended ? "reconcileApplied" : "reconcileNoChange");
     const uiSourceLabel = multilineExtended !== uiHighlight
       ? `uiHighlightExactMultiLine:${uiDetails.source}`
       : `uiHighlightExact:${uiDetails.source}`;
-    if (reconciled !== uiHighlight) {
-      return {
-        text: reconciled,
-        source: `${uiSourceLabel}:reconciled`,
-        confidence: "high"
-      };
-    }
-
     return {
-      text: multilineExtended,
-      source: uiSourceLabel,
+      text: reconciled,
+      source: `${uiSourceLabel}:${reconcileDecision}`,
       confidence: "high"
     };
   }
 
-  const phrase = getPhraseAtPos(fullText, dataPos, 10, 140);
   const token = getTokenAtPos(fullText, dataPos);
 
   if (phrase && phrase.split(/\s+/).length >= 2) {
@@ -1440,7 +2174,45 @@ function resolveHighlightAtPos(fullText: string, dataPos: number, uiDetails: UiH
   };
 }
 
-function buildThreadDebugString(params: {
+type ThreadDebugFields = {
+  dbgSource: string;
+  dbgConfidence: string;
+  dbgInteraction: string;
+  dbgUiSource: string;
+  dbgUiLen: number | "";
+  dbgDataPos: number | "";
+  dbgEntryHighlighted: boolean | "";
+  dbgLocalAnchorFound: boolean | "";
+  dbgLocalDataPos: number | "";
+  dbgLocalContextStart: number | "";
+  dbgLocalContextEnd: number | "";
+  dbgScrollMethod: string;
+  dbgScrollTargetLine: number | "";
+  dbgScrollTargetVisible: boolean | "";
+  dbgUiCandidates: string;
+};
+
+function emptyThreadDebugFields(): ThreadDebugFields {
+  return {
+    dbgSource: "",
+    dbgConfidence: "",
+    dbgInteraction: "",
+    dbgUiSource: "",
+    dbgUiLen: "",
+    dbgDataPos: "",
+    dbgEntryHighlighted: "",
+    dbgLocalAnchorFound: "",
+    dbgLocalDataPos: "",
+    dbgLocalContextStart: "",
+    dbgLocalContextEnd: "",
+    dbgScrollMethod: "",
+    dbgScrollTargetLine: "",
+    dbgScrollTargetVisible: "",
+    dbgUiCandidates: ""
+  };
+}
+
+function buildThreadDebugFields(params: {
   highlightSource: string;
   highlightConfidence: HighlightConfidence;
   interactionMode: "hover-click-cycle" | "hover-only";
@@ -1449,36 +2221,232 @@ function buildThreadDebugString(params: {
   activePos: number;
   uiDetails: UiHighlightDetails;
   uiHighlight: string;
-  editorSource: EditorLines["source"];
-  editorLineCoverage: number;
-  threadId: string;
+  localAnchor: LocalContextAnchor | null;
   scrollCheck: ScrollCheck;
-}): string {
-  return [
-    `threadId=${params.threadId}`,
-    `source=${params.highlightSource}`,
-    `confidence=${params.highlightConfidence}`,
-    `interaction=${params.interactionMode}`,
-    `entryHighlighted=${params.entryHighlighted}`,
-    `dataPos=${params.dataPos}`,
-    `activePos=${params.activePos}`,
-    `uiSource=${params.uiDetails.source}`,
-    `uiFocusCommentN=${params.uiDetails.focusCommentCount}`,
-    `uiFocusAnyN=${params.uiDetails.focusAnyCount}`,
-    `uiHighlightCommentN=${params.uiDetails.highlightCommentCount}`,
-    `uiHighlightAnyN=${params.uiDetails.highlightAnyCount}`,
-    `uiChangeCommentN=${params.uiDetails.changeCommentCount}`,
-    `uiChangeAnyN=${params.uiDetails.changeAnyCount}`,
-    `uiLen=${normalizeSpaces(params.uiHighlight).length}`,
-    `editorSource=${params.editorSource}`,
-    `editorLineCoverage=${params.editorLineCoverage.toFixed(3)}`,
-    `scrollMethod=${params.scrollCheck.method}`,
-    `scrollTargetLine=${params.scrollCheck.targetLine}`,
-    `scrollTargetComputed=${params.scrollCheck.targetLine >= 0}`,
-    `scrollVisibleStart=${params.scrollCheck.visibleStart}`,
-    `scrollVisibleEnd=${params.scrollCheck.visibleEnd}`,
-    `scrollTargetVisible=${params.scrollCheck.targetVisible}`
-  ].join(" | ");
+}): ThreadDebugFields {
+  return {
+    dbgSource: params.highlightSource,
+    dbgConfidence: params.highlightConfidence,
+    dbgInteraction: params.interactionMode,
+    dbgUiSource: params.uiDetails.source,
+    dbgUiLen: params.uiHighlight.length,
+    dbgDataPos: params.dataPos,
+    dbgEntryHighlighted: params.entryHighlighted,
+    dbgLocalAnchorFound: !!params.localAnchor,
+    dbgLocalDataPos: params.localAnchor ? params.localAnchor.localDataPos : "",
+    dbgLocalContextStart: params.localAnchor ? params.localAnchor.contextStart : "",
+    dbgLocalContextEnd: params.localAnchor ? params.localAnchor.contextEnd : "",
+    dbgScrollMethod: params.scrollCheck.method,
+    dbgScrollTargetLine: params.scrollCheck.targetLine,
+    dbgScrollTargetVisible: params.scrollCheck.targetVisible,
+    dbgUiCandidates: params.uiDetails.candidateSummary
+  };
+}
+
+function isScrollableElement(el: HTMLElement): boolean {
+  if (el.clientHeight <= 0) {
+    return false;
+  }
+
+  if (el.scrollHeight <= el.clientHeight + 1) {
+    return false;
+  }
+
+  const style = window.getComputedStyle(el);
+  return style.overflowY === "auto" || style.overflowY === "scroll";
+}
+
+function getReviewPanelScroller(): HTMLElement | null {
+  const explicitCandidates = Array.from(document.querySelectorAll(
+    ".review-panel .review-panel-body, .review-panel .review-panel-entries, .review-panel .review-panel-content, .review-panel"
+  )).filter((el): el is HTMLElement => el instanceof HTMLElement);
+
+  for (const candidate of explicitCandidates) {
+    if (isScrollableElement(candidate) && candidate.querySelector(".review-panel-entry-comment")) {
+      return candidate;
+    }
+  }
+
+  const firstEntry = document.querySelector(".review-panel-entry-comment") as HTMLElement | null;
+  if (!firstEntry) {
+    return null;
+  }
+
+  let parent = firstEntry.parentElement;
+  while (parent) {
+    if (isScrollableElement(parent)) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+
+  return null;
+}
+
+function getReviewEntryKey(entry: Element): string {
+  const threadId = extractThreadId(entry);
+  const dataPos = getEntryDataPos(entry);
+  const firstBody = (entry.querySelector(".review-panel-comment-body")?.textContent ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+  return `${threadId}|${dataPos}|${firstBody}`;
+}
+
+async function processReviewEntry(params: {
+  entry: Element;
+  editor: EditorLines;
+  rows: CommentRow[];
+  errors: string[];
+}): Promise<void> {
+  const { entry, editor, rows, errors } = params;
+
+  let threadId = "";
+  let dataPos = -1;
+  let uiDetails: UiHighlightDetails = {
+    text: "",
+    source: "not-run",
+    candidateSummary: "",
+    focusCommentCount: 0,
+    focusAnyCount: 0,
+    highlightCommentCount: 0,
+    highlightAnyCount: 0,
+    changeCommentCount: 0,
+    changeAnyCount: 0
+  };
+  let uiHighlight = "";
+  let interactionMode: "hover-click-cycle" | "hover-only" = "hover-click-cycle";
+  let activePos = -1;
+  let entryHighlighted = false;
+  let scrollCheck: ScrollCheck = {
+    method: "not-run",
+    targetLine: -1,
+    visibleStart: -1,
+    visibleEnd: -1,
+    targetVisible: false
+  };
+
+  try {
+    const expandedInEntry = await expandCollapsedComments(entry);
+    if (expandedInEntry > 0) {
+      console.log("extractComments: Expanded collapsed comments in entry", { expandedInEntry });
+    }
+
+    threadId = extractThreadId(entry);
+    dataPos = getEntryDataPos(entry);
+    scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
+    interactionMode = "hover-click-cycle";
+    await hoverReviewEntry(entry);
+    await sleep(40);
+    uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos, editor.changeCommentCandidates);
+    uiHighlight = uiDetails.text;
+
+    if (!hasAnyText(uiHighlight)) {
+      scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
+      interactionMode = "hover-only";
+      await hoverOnlyReviewEntry(entry);
+      await sleep(50);
+      uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos, editor.changeCommentCandidates);
+      uiHighlight = uiDetails.text;
+    }
+
+    activePos = dataPos >= 0 && dataPos < editor.fullText.length ? dataPos : -1;
+    let context = "";
+    if (activePos >= 0) {
+      [, context] = getContextAtPos(editor, activePos);
+    }
+    entryHighlighted = isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry);
+
+    const highlightResolution = activePos >= 0
+      ? resolveHighlightAtPos(editor.fullText, activePos, uiDetails)
+      : {
+        text: "",
+        source: "invalidDataPos",
+        confidence: "none"
+      } satisfies HighlightResolution;
+
+    if (scrollCheck.targetLine < 0) {
+      errors.push(
+        `Thread ${threadId || "(no-thread-id)"}: unable to compute target line from data-pos ${dataPos}.`
+      );
+    }
+
+    if (highlightResolution.confidence === "none") {
+      errors.push(
+        `Thread ${threadId || "(no-thread-id)"}: no highlight resolved at data-pos ${dataPos} (uiSource=${uiDetails.source}).`
+      );
+    }
+
+    console.log("extractComments: Entry analysis", {
+      threadId,
+      dataPos,
+      interactionMode,
+      activePos,
+      uiHighlight: uiHighlight.substring(0, 50),
+      uiSource: uiDetails.source,
+      resolvedHighlight: highlightResolution.text.substring(0, 50),
+      confidence: highlightResolution.confidence
+    });
+
+    const highlightedText = highlightResolution.text;
+    const highlightSource = highlightResolution.source;
+    const localAnchor = getLocalDataPosInContext(editor.fullText, dataPos, 1200);
+    const debugFields = buildThreadDebugFields({
+      highlightSource,
+      highlightConfidence: highlightResolution.confidence,
+      interactionMode,
+      entryHighlighted,
+      dataPos,
+      activePos,
+      uiDetails,
+      uiHighlight,
+      localAnchor,
+      scrollCheck
+    });
+    console.log("extractComments: Selected highlighted text", { selected: highlightedText.substring(0, 50) });
+
+    const commentEls = entry.querySelectorAll(".review-panel-comment");
+    let index = 0;
+    for (const commentEl of Array.from(commentEls)) {
+      const body = (commentEl.querySelector(".review-panel-comment-body")?.textContent ?? "").trim();
+      if (!body) {
+        continue;
+      }
+
+      rows.push({
+        threadId,
+        commentIndex: index,
+        author: extractUser(commentEl),
+        date: (commentEl.querySelector(".review-panel-entry-time")?.textContent ?? "").trim(),
+        comment: body,
+        highlightedText: index === 0 ? highlightedText : "",
+        context: index === 0 ? context : "",
+        charPos: index === 0 ? activePos : "",
+        ...(index === 0 ? debugFields : emptyThreadDebugFields())
+      });
+      index += 1;
+    }
+  } catch (error) {
+    const msg = String(error);
+    const localAnchor = getLocalDataPosInContext(editor.fullText, dataPos, 1200);
+    const debugFields = buildThreadDebugFields({
+      highlightSource: "error",
+      highlightConfidence: "none",
+      interactionMode,
+      entryHighlighted,
+      dataPos,
+      activePos,
+      uiDetails,
+      uiHighlight,
+      localAnchor,
+      scrollCheck
+    });
+    errors.push(
+      `${msg} | source=${debugFields.dbgSource} | confidence=${debugFields.dbgConfidence} | interaction=${debugFields.dbgInteraction} | dataPos=${debugFields.dbgDataPos} | uiSource=${debugFields.dbgUiSource} | scrollMethod=${debugFields.dbgScrollMethod}`
+    );
+    console.warn("extractComments: Skipping thread after strict extraction error", { threadId, error: msg });
+  }
 }
 
 async function extractComments(): Promise<ExtractCommentsResult> {
@@ -1490,159 +2458,77 @@ async function extractComments(): Promise<ExtractCommentsResult> {
   console.log("extractComments: Editor lines built", {
     source: editor.source,
     lineCoverage: editor.lineCoverage,
+    changeCommentCandidates: editor.changeCommentCandidates.length,
     linesCount: editor.lines.length,
     fullTextLen: editor.fullText.length,
     fullText: editor.fullText.substring(0, 200)
   });
 
-  const entries = document.querySelectorAll(".review-panel-entry-comment");
-  const entryList = Array.from(entries);
-  console.log("extractComments: Found entries", { count: entries.length });
-  
-  for (const entry of entryList) {
-    let threadId = "";
-    let dataPos = -1;
-    let uiDetails: UiHighlightDetails = {
-      text: "",
-      source: "not-run",
-      focusCommentCount: 0,
-      focusAnyCount: 0,
-      highlightCommentCount: 0,
-      highlightAnyCount: 0,
-      changeCommentCount: 0,
-      changeAnyCount: 0
-    };
-    let uiHighlight = "";
-    let interactionMode: "hover-click-cycle" | "hover-only" = "hover-click-cycle";
-    let activePos = -1;
-    let entryHighlighted = false;
-    let scrollCheck: ScrollCheck = {
-      method: "not-run",
-      targetLine: -1,
-      visibleStart: -1,
-      visibleEnd: -1,
-      targetVisible: false
-    };
-    try {
-      const expandedInEntry = await expandCollapsedComments(entry);
-      if (expandedInEntry > 0) {
-        console.log("extractComments: Expanded collapsed comments in entry", { expandedInEntry });
+  const seenEntryKeys = new Set<string>();
+  const reviewPanelScroller = getReviewPanelScroller();
+
+  if (reviewPanelScroller) {
+    reviewPanelScroller.scrollTop = 0;
+    await sleep(120);
+  }
+
+  const processVisibleEntries = async (): Promise<number> => {
+    let processed = 0;
+    const visibleEntries = Array.from(document.querySelectorAll(".review-panel-entry-comment"));
+    for (const entry of visibleEntries) {
+      const key = getReviewEntryKey(entry);
+      if (seenEntryKeys.has(key)) {
+        continue;
       }
 
-      threadId = extractThreadId(entry);
-      dataPos = getEntryDataPos(entry);
-      scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
-      interactionMode = "hover-click-cycle";
-      await hoverReviewEntry(entry);
-      await sleep(40);
-      uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos);
-      uiHighlight = uiDetails.text;
-
-      if (!normalizeSpaces(uiHighlight)) {
-        scrollCheck = await scrollEditorToPos(dataPos, editor.lines);
-        interactionMode = "hover-only";
-        await hoverOnlyReviewEntry(entry);
-        await sleep(50);
-        uiDetails = getFocusedHighlightDetails(editor.fullText, dataPos);
-        uiHighlight = uiDetails.text;
-      }
-
-      activePos = dataPos >= 0 && dataPos < editor.fullText.length ? dataPos : -1;
-      let context = "";
-      if (activePos >= 0) {
-        [, context] = getContextAtPos(editor, activePos);
-      }
-      entryHighlighted = isCurrentHighlightedEntry(entry) || isEntryHighlighted(entry);
-
-      const highlightResolution = activePos >= 0
-        ? resolveHighlightAtPos(editor.fullText, activePos, uiDetails)
-        : {
-          text: "",
-          source: "invalidDataPos",
-          confidence: "none"
-        } satisfies HighlightResolution;
-
-      if (scrollCheck.targetLine < 0) {
-        errors.push(
-          `Thread ${threadId || "(no-thread-id)"}: unable to compute target line from data-pos ${dataPos}.`
-        );
-      }
-
-      if (highlightResolution.confidence === "none") {
-        errors.push(
-          `Thread ${threadId || "(no-thread-id)"}: no highlight resolved at data-pos ${dataPos} (uiSource=${uiDetails.source}).`
-        );
-      }
-
-      console.log("extractComments: Entry analysis", {
-        threadId,
-        dataPos,
-        interactionMode,
-        activePos,
-        uiHighlight: uiHighlight.substring(0, 50),
-        uiSource: uiDetails.source,
-        resolvedHighlight: highlightResolution.text.substring(0, 50),
-        confidence: highlightResolution.confidence
-      });
-
-      const highlightedText = highlightResolution.text;
-      const highlightSource = highlightResolution.source;
-      const debug = buildThreadDebugString({
-        highlightSource,
-        highlightConfidence: highlightResolution.confidence,
-        interactionMode,
-        entryHighlighted,
-        dataPos,
-        activePos,
-        uiDetails,
-        uiHighlight,
-        editorSource: editor.source,
-        editorLineCoverage: editor.lineCoverage,
-        threadId,
-        scrollCheck
-      });
-      console.log("extractComments: Selected highlighted text", { selected: highlightedText.substring(0, 50) });
-
-      const commentEls = entry.querySelectorAll(".review-panel-comment");
-      let index = 0;
-      for (const commentEl of Array.from(commentEls)) {
-        const body = (commentEl.querySelector(".review-panel-comment-body")?.textContent ?? "").trim();
-        if (!body) {
-          continue;
-        }
-
-        rows.push({
-          threadId,
-          commentIndex: index,
-          author: extractUser(commentEl),
-          date: (commentEl.querySelector(".review-panel-entry-time")?.textContent ?? "").trim(),
-          comment: body,
-          highlightedText: index === 0 ? highlightedText : "",
-          context: index === 0 ? context : "",
-          charPos: index === 0 ? activePos : "",
-          debug: index === 0 ? debug : ""
-        });
-        index += 1;
-      }
-    } catch (error) {
-      const msg = String(error);
-      const debug = buildThreadDebugString({
-        highlightSource: "error",
-        highlightConfidence: "none",
-        interactionMode,
-        entryHighlighted,
-        dataPos,
-        activePos,
-        uiDetails,
-        uiHighlight,
-        editorSource: editor.source,
-        editorLineCoverage: editor.lineCoverage,
-        threadId: threadId || extractThreadId(entry),
-        scrollCheck
-      });
-      errors.push(`${msg} | ${debug}`);
-      console.warn("extractComments: Skipping thread after strict extraction error", { threadId, error: msg });
+      seenEntryKeys.add(key);
+      await processReviewEntry({ entry, editor, rows, errors });
+      processed += 1;
     }
+    return processed;
+  };
+
+  if (!reviewPanelScroller) {
+    console.warn("extractComments: Review panel scroller not found; processing only currently rendered entries");
+    await processVisibleEntries();
+  } else {
+    let noProgressIterations = 0;
+
+    for (let i = 0; i < 80; i += 1) {
+      const beforeSeen = seenEntryKeys.size;
+      const processedNow = await processVisibleEntries();
+      const maxTop = Math.max(0, reviewPanelScroller.scrollHeight - reviewPanelScroller.clientHeight);
+      const atBottom = reviewPanelScroller.scrollTop >= maxTop - 1;
+
+      if (processedNow === 0) {
+        noProgressIterations += 1;
+      } else {
+        noProgressIterations = 0;
+      }
+
+      if (atBottom && seenEntryKeys.size === beforeSeen) {
+        break;
+      }
+
+      const prevTop = reviewPanelScroller.scrollTop;
+      const step = Math.max(90, Math.floor(reviewPanelScroller.clientHeight * 0.85));
+      reviewPanelScroller.scrollTop = Math.min(maxTop, prevTop + step);
+      await sleep(140);
+
+      const moved = Math.abs(reviewPanelScroller.scrollTop - prevTop) > 0.5;
+      if (!moved && noProgressIterations >= 2) {
+        break;
+      }
+
+      if (noProgressIterations >= 6) {
+        break;
+      }
+    }
+
+    console.log("extractComments: Completed scroll sweep", {
+      uniqueEntriesProcessed: seenEntryKeys.size,
+      rowsExported: rows.length
+    });
   }
 
   return {

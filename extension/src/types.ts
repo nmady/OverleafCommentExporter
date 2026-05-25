@@ -7,5 +7,19 @@ export interface CommentRow {
   highlightedText: string;
   context: string;
   charPos: number | "";
-  debug: string;
+  dbgSource: string;
+  dbgConfidence: string;
+  dbgInteraction: string;
+  dbgUiSource: string;
+  dbgUiLen: number | "";
+  dbgDataPos: number | "";
+  dbgEntryHighlighted: boolean | "";
+  dbgLocalAnchorFound: boolean | "";
+  dbgLocalDataPos: number | "";
+  dbgLocalContextStart: number | "";
+  dbgLocalContextEnd: number | "";
+  dbgScrollMethod: string;
+  dbgScrollTargetLine: number | "";
+  dbgScrollTargetVisible: boolean | "";
+  dbgUiCandidates: string;
 }

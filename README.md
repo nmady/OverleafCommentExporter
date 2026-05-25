@@ -1,24 +1,14 @@
-# Overleaf Comment Scraper
+# Overleaf Comment Exporter
 
-Tools for extracting and analyzing Overleaf review comments.
+Browser extension for exporting Overleaf review comments to CSV.
 
-## Project Structure
+## What’s Here
 
-- `scraper.py`: Python scraper/exporter for comment data.
-- `analyzer.py`: Analysis utilities for exported comment data.
-- `extension/`: Browser extension for exporting comments from Overleaf.
+- `extension/`: the Firefox-compatible browser extension.
+- `samples/`: sample Overleaf exports and reference CSVs for comparison.
+- `overleaf-comments-corrected.csv`: curated reference output for quality checks.
 
-## Setup
-
-### Python tools
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Browser extension
+## Build
 
 ```bash
 cd extension
@@ -26,8 +16,20 @@ npm install
 npm run build
 ```
 
-Load the extension from the `extension/` folder (and ensure `dist/` has been built).
+## Load The Extension
 
-## GitHub
+1. Open Firefox and go to `about:debugging`.
+2. Choose This Firefox and click Load Temporary Add-on.
+3. Select `extension/manifest.json`.
+4. Reload Overleaf after the extension is loaded.
 
-This repository is set up to ignore generated CSV/XLSX outputs and build artifacts by default.
+## Export Flow
+
+1. Open an Overleaf project with review comments.
+2. Use the extension popup to start an export.
+3. Download the generated CSV and compare it with the reference files in `samples/` when needed.
+
+## Notes
+
+- Build artifacts in `extension/dist/` are generated and should not be edited by hand.
+- Generated CSV outputs are intentionally kept out of version control.
