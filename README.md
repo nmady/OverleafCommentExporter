@@ -6,7 +6,6 @@ Browser extension for exporting Overleaf review comments to CSV.
 
 - `extension/`: the Firefox-compatible browser extension.
 - `samples/`: sample Overleaf exports and reference CSVs for comparison.
-- `overleaf-comments-corrected.csv`: curated reference output for quality checks.
 
 ## Build
 
@@ -14,6 +13,24 @@ Browser extension for exporting Overleaf review comments to CSV.
 cd extension
 npm install
 npm run build
+```
+
+## Package For addons.mozilla.org (AMO)
+
+```bash
+cd extension
+npm install
+npm run package
+```
+
+The packaged artifact is written to `extension/web-ext-artifacts/`.
+
+Optional pre-submit checks:
+
+```bash
+cd extension
+npm run typecheck
+npm run lint:firefox
 ```
 
 ## Load The Extension
@@ -33,3 +50,4 @@ npm run build
 
 - Build artifacts in `extension/dist/` are generated and should not be edited by hand.
 - Generated CSV outputs are intentionally kept out of version control.
+- Privacy policy for AMO submission: `PRIVACY.md`.

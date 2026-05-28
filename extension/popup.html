@@ -49,6 +49,16 @@
         cursor: default;
       }
 
+      .btn-group {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .btn-xlsx {
+        background: #1a5fa8;
+      }
+
       .status {
         min-height: 18px;
         margin-top: 10px;
@@ -59,8 +69,11 @@
   <body>
     <div class="wrap">
       <h1>Overleaf Comment Exporter</h1>
-      <p>Open the Review panel in Overleaf, then export comments to CSV.</p>
-      <button id="export-btn">Export Comments</button>
+      <p>Open the Review panel in Overleaf, then export comments.</p>
+      <div class="btn-group">
+        <button id="export-btn">Export CSV</button>
+        <button id="export-xlsx-btn" class="btn-xlsx">Export XLSX</button>
+      </div>
       <div id="status" class="status"></div>
     </div>
     <script src="dist/popup.js"></script>
