@@ -2174,75 +2174,6 @@ function resolveHighlightAtPos(fullText: string, dataPos: number, uiDetails: UiH
   };
 }
 
-type ThreadDebugFields = {
-  dbgSource: string;
-  dbgConfidence: string;
-  dbgInteraction: string;
-  dbgUiSource: string;
-  dbgUiLen: number | "";
-  dbgDataPos: number | "";
-  dbgEntryHighlighted: boolean | "";
-  dbgLocalAnchorFound: boolean | "";
-  dbgLocalDataPos: number | "";
-  dbgLocalContextStart: number | "";
-  dbgLocalContextEnd: number | "";
-  dbgScrollMethod: string;
-  dbgScrollTargetLine: number | "";
-  dbgScrollTargetVisible: boolean | "";
-  dbgUiCandidates: string;
-};
-
-function emptyThreadDebugFields(): ThreadDebugFields {
-  return {
-    dbgSource: "",
-    dbgConfidence: "",
-    dbgInteraction: "",
-    dbgUiSource: "",
-    dbgUiLen: "",
-    dbgDataPos: "",
-    dbgEntryHighlighted: "",
-    dbgLocalAnchorFound: "",
-    dbgLocalDataPos: "",
-    dbgLocalContextStart: "",
-    dbgLocalContextEnd: "",
-    dbgScrollMethod: "",
-    dbgScrollTargetLine: "",
-    dbgScrollTargetVisible: "",
-    dbgUiCandidates: ""
-  };
-}
-
-function buildThreadDebugFields(params: {
-  highlightSource: string;
-  highlightConfidence: HighlightConfidence;
-  interactionMode: "hover-click-cycle" | "hover-only";
-  entryHighlighted: boolean;
-  dataPos: number;
-  activePos: number;
-  uiDetails: UiHighlightDetails;
-  uiHighlight: string;
-  localAnchor: LocalContextAnchor | null;
-  scrollCheck: ScrollCheck;
-}): ThreadDebugFields {
-  return {
-    dbgSource: params.highlightSource,
-    dbgConfidence: params.highlightConfidence,
-    dbgInteraction: params.interactionMode,
-    dbgUiSource: params.uiDetails.source,
-    dbgUiLen: params.uiHighlight.length,
-    dbgDataPos: params.dataPos,
-    dbgEntryHighlighted: params.entryHighlighted,
-    dbgLocalAnchorFound: !!params.localAnchor,
-    dbgLocalDataPos: params.localAnchor ? params.localAnchor.localDataPos : "",
-    dbgLocalContextStart: params.localAnchor ? params.localAnchor.contextStart : "",
-    dbgLocalContextEnd: params.localAnchor ? params.localAnchor.contextEnd : "",
-    dbgScrollMethod: params.scrollCheck.method,
-    dbgScrollTargetLine: params.scrollCheck.targetLine,
-    dbgScrollTargetVisible: params.scrollCheck.targetVisible,
-    dbgUiCandidates: params.uiDetails.candidateSummary
-  };
-}
-
 function isScrollableElement(el: HTMLElement): boolean {
   if (el.clientHeight <= 0) {
     return false;
@@ -2390,20 +2321,6 @@ async function processReviewEntry(params: {
     });
 
     const highlightedText = highlightResolution.text;
-    const highlightSource = highlightResolution.source;
-    const localAnchor = getLocalDataPosInContext(editor.fullText, dataPos, 1200);
-    const debugFields = buildThreadDebugFields({
-      highlightSource,
-      highlightConfidence: highlightResolution.confidence,
-      interactionMode,
-      entryHighlighted,
-      dataPos,
-      activePos,
-      uiDetails,
-      uiHighlight,
-      localAnchor,
-      scrollCheck
-    });
     console.log("extractComments: Selected highlighted text", { selected: highlightedText.substring(0, 50) });
 
     const commentEls = entry.querySelectorAll(".review-panel-comment");
@@ -2422,29 +2339,13 @@ async function processReviewEntry(params: {
         comment: body,
         highlightedText: index === 0 ? highlightedText : "",
         context: index === 0 ? context : "",
-        charPos: index === 0 ? activePos : "",
-        ...(index === 0 ? debugFields : emptyThreadDebugFields())
+        charPos: index === 0 ? activePos : ""
       });
       index += 1;
     }
   } catch (error) {
     const msg = String(error);
-    const localAnchor = getLocalDataPosInContext(editor.fullText, dataPos, 1200);
-    const debugFields = buildThreadDebugFields({
-      highlightSource: "error",
-      highlightConfidence: "none",
-      interactionMode,
-      entryHighlighted,
-      dataPos,
-      activePos,
-      uiDetails,
-      uiHighlight,
-      localAnchor,
-      scrollCheck
-    });
-    errors.push(
-      `${msg} | source=${debugFields.dbgSource} | confidence=${debugFields.dbgConfidence} | interaction=${debugFields.dbgInteraction} | dataPos=${debugFields.dbgDataPos} | uiSource=${debugFields.dbgUiSource} | scrollMethod=${debugFields.dbgScrollMethod}`
-    );
+    errors.push(msg);
     console.warn("extractComments: Skipping thread after strict extraction error", { threadId, error: msg });
   }
 }

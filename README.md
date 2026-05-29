@@ -1,6 +1,6 @@
 # Overleaf Comment Exporter
 
-Browser extension for exporting Overleaf review comments to CSV.
+Browser extension for exporting Overleaf review comments to CSV or XLSX.
 
 ## What’s Here
 
@@ -29,9 +29,10 @@ Optional pre-submit checks:
 
 ```bash
 cd extension
-npm run typecheck
-npm run lint:firefox
+npm run validate:release
 ```
+
+AMO submission checklist: `AMO_RELEASE_CHECKLIST.md`.
 
 ## Load The Extension
 

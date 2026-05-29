@@ -7,8 +7,9 @@
     "build": "esbuild src/content.ts --bundle --format=iife --outfile=dist/content.js && esbuild src/popup.ts --bundle --format=iife --outfile=dist/popup.js",
     "typecheck": "tsc --noEmit",
     "lint:firefox": "web-ext lint -s .",
-    "pack": "web-ext build -s . -a web-ext-artifacts --filename overleaf-comment-exporter-{version}.zip --ignore-files src/** node_modules/** tsconfig.json DIAGNOSTIC.md package-lock.json",
-    "package": "npm run build && npm run pack"
+    "pack": "web-ext build -s . -a web-ext-artifacts --filename overleaf-comment-exporter-{version}.zip --overwrite-dest --ignore-files src/** node_modules/** tsconfig.json DIAGNOSTIC.md package-lock.json",
+    "package": "npm run build && npm run pack",
+    "validate:release": "npm run typecheck && npm run build && npm run lint:firefox && npm run pack"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.280",
@@ -17,7 +18,6 @@
     "web-ext": "^8.9.0"
   },
   "dependencies": {
-    "exceljs": "^4.4.0",
-    "jszip": "^3.10.1"
+    "fflate": "^0.8.2"
   }
 }

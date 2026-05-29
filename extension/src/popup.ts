@@ -1,9 +1,5 @@
 import { CommentRow } from "./types";
-import ExcelJS from "exceljs";
-
-type CommentRowWire = CommentRow & {
-  debug?: string;
-};
+import { strToU8, zipSync } from "fflate";
 
 const COLUMNS: Array<[keyof CommentRow, string]> = [
   ["threadId", "Thread ID"],
@@ -13,22 +9,7 @@ const COLUMNS: Array<[keyof CommentRow, string]> = [
   ["comment", "Comment"],
   ["highlightedText", "Highlighted Text"],
   ["context", "Context"],
-  ["charPos", "Char Position"],
-  ["dbgSource", "Dbg Source"],
-  ["dbgConfidence", "Dbg Confidence"],
-  ["dbgInteraction", "Dbg Interaction"],
-  ["dbgUiSource", "Dbg UI Source"],
-  ["dbgUiLen", "Dbg UI Len"],
-  ["dbgDataPos", "Dbg Data Pos"],
-  ["dbgEntryHighlighted", "Dbg Entry Highlighted"],
-  ["dbgLocalAnchorFound", "Dbg Local Anchor Found"],
-  ["dbgLocalDataPos", "Dbg Local Data Pos"],
-  ["dbgLocalContextStart", "Dbg Local Context Start"],
-  ["dbgLocalContextEnd", "Dbg Local Context End"],
-  ["dbgScrollMethod", "Dbg Scroll Method"],
-  ["dbgScrollTargetLine", "Dbg Scroll Target Line"],
-  ["dbgScrollTargetVisible", "Dbg Scroll Target Visible"],
-  ["dbgUiCandidates", "Dbg UI Candidates"]
+  ["charPos", "Char Position"]
 ];
 
 function csvEscape(value: string | number | boolean): string {
@@ -45,143 +26,207 @@ function toCsv(rows: CommentRow[]): string {
   return [header, ...body].join("\r\n");
 }
 
-function parseLegacyDebug(debug: string): Partial<CommentRow> {
-  const parsed = new Map<string, string>();
-  for (const chunk of debug.split(" | ")) {
-    const eq = chunk.indexOf("=");
-    if (eq <= 0) {
-      continue;
-    }
-    parsed.set(chunk.slice(0, eq), chunk.slice(eq + 1));
-  }
-
-  const readNumber = (key: string): number | "" => {
-    const value = parsed.get(key);
-    if (value == null || value === "") {
-      return "";
-    }
-    const num = Number(value);
-    return Number.isFinite(num) ? num : "";
-  };
-
-  const readBoolean = (key: string): boolean | "" => {
-    const value = parsed.get(key);
-    if (value == null || value === "") {
-      return "";
-    }
-    if (value === "true") {
-      return true;
-    }
-    if (value === "false") {
-      return false;
-    }
-    return "";
-  };
-
-  return {
-    dbgSource: parsed.get("source") ?? "",
-    dbgConfidence: parsed.get("confidence") ?? "",
-    dbgInteraction: parsed.get("interaction") ?? "",
-    dbgUiSource: parsed.get("uiSource") ?? "",
-    dbgUiLen: readNumber("uiLen"),
-    dbgDataPos: readNumber("dataPos"),
-    dbgEntryHighlighted: readBoolean("entryHighlighted"),
-    dbgLocalAnchorFound: "",
-    dbgLocalDataPos: "",
-    dbgLocalContextStart: "",
-    dbgLocalContextEnd: "",
-    dbgScrollMethod: parsed.get("scrollMethod") ?? "",
-    dbgScrollTargetLine: readNumber("scrollTargetLine"),
-    dbgScrollTargetVisible: readBoolean("scrollTargetVisible"),
-    dbgUiCandidates: parsed.get("uiCandidates") ?? ""
-  };
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
-function normalizeRows(rows: CommentRowWire[]): CommentRow[] {
-  return rows.map((row) => {
-    if (row.dbgSource || row.dbgConfidence || row.dbgUiSource || row.dbgUiCandidates) {
-      return row;
-    }
-
-    if (!row.debug) {
-      return row;
-    }
-
-    return {
-      ...row,
-      ...parseLegacyDebug(row.debug)
-    };
-  });
+function toColumnName(index: number): string {
+  let value = "";
+  let n = index;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    value = String.fromCharCode(65 + rem) + value;
+    n = Math.floor((n - 1) / 26);
+  }
+  return value;
 }
 
-function buildContextCellValue(
-  context: string,
-  highlightedText: string
-): ExcelJS.CellRichTextValue | string {
-  if (!highlightedText || !context) {
-    return context;
+function textNode(value: string): string {
+  const escaped = xmlEscape(value);
+  if (/^\s|\s$|\n|\t|  /.test(value)) {
+    return `<t xml:space="preserve">${escaped}</t>`;
   }
+  return `<t>${escaped}</t>`;
+}
+
+function buildContextRuns(context: string, highlightedText: string): Array<{ text: string; emphasize: boolean }> {
+  if (!context || !highlightedText) {
+    return [{ text: context, emphasize: false }];
+  }
+
   const idx = context.indexOf(highlightedText);
   if (idx === -1) {
-    return context;
+    return [{ text: context, emphasize: false }];
   }
+
   const before = context.slice(0, idx);
   const after = context.slice(idx + highlightedText.length);
-  const runs: ExcelJS.RichText[] = [];
+  const runs: Array<{ text: string; emphasize: boolean }> = [];
   if (before) {
-    runs.push({ text: before });
+    runs.push({ text: before, emphasize: false });
   }
-  runs.push({ font: { bold: true, underline: true }, text: highlightedText });
+  runs.push({ text: highlightedText, emphasize: true });
   if (after) {
-    runs.push({ text: after });
+    runs.push({ text: after, emphasize: false });
   }
-  return { richText: runs };
+  return runs;
+}
+
+function inlineStringCell(ref: string, value: string, styleIndex?: number): string {
+  const styleAttr = styleIndex != null ? ` s="${styleIndex}"` : "";
+  return `<c r="${ref}" t="inlineStr"${styleAttr}><is>${textNode(value)}</is></c>`;
+}
+
+function richTextCell(ref: string, runs: Array<{ text: string; emphasize: boolean }>, styleIndex?: number): string {
+  const styleAttr = styleIndex != null ? ` s="${styleIndex}"` : "";
+  const runXml = runs
+    .filter((run) => run.text.length > 0)
+    .map((run) => {
+      const style = run.emphasize ? "<rPr><b/><u/></rPr>" : "";
+      return `<r>${style}${textNode(run.text)}</r>`;
+    })
+    .join("");
+  const normalizedRuns = runXml || `<r>${textNode("")}</r>`;
+  return `<c r="${ref}" t="inlineStr"${styleAttr}><is>${normalizedRuns}</is></c>`;
+}
+
+function numberCell(ref: string, value: number, styleIndex?: number): string {
+  const styleAttr = styleIndex != null ? ` s="${styleIndex}"` : "";
+  return `<c r="${ref}"${styleAttr}><v>${value}</v></c>`;
 }
 
 async function toXlsx(rows: CommentRow[]): Promise<Blob> {
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet("Comments");
-
-  const wrapAlignment = { wrapText: true, vertical: "top" as const };
-
-  worksheet.columns = [
-    { header: "Thread ID",        key: "threadId",        width: 18 },
-    { header: "Reply #",          key: "commentIndex",    width: 8 },
-    { header: "Author",           key: "author",          width: 20 },
-    { header: "Date",             key: "date",            width: 22 },
-    { header: "Comment",          key: "comment",         width: 45, style: { alignment: wrapAlignment } },
-    { header: "Highlighted Text", key: "highlightedText", width: 32, style: { alignment: wrapAlignment } },
-    { header: "Context",          key: "context",         width: 48, style: { alignment: wrapAlignment } },
-    { header: "Char Position",    key: "charPos",         width: 14 },
+  const headers = [
+    "Thread ID",
+    "Reply #",
+    "Author",
+    "Date",
+    "Comment",
+    "Highlighted Text",
+    "Context",
+    "Char Position"
   ];
+  const widths = [18, 8, 20, 22, 45, 32, 48, 14];
 
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  const rowXml: string[] = [];
 
-  for (const row of rows) {
-    const wsRow = worksheet.addRow({
-      threadId:        row.threadId,
-      commentIndex:    row.commentIndex,
-      author:          row.author,
-      date:            row.date,
-      comment:         row.comment,
-      highlightedText: row.highlightedText,
-      charPos:         row.charPos,
-    });
-    const contextCell = wsRow.getCell("context");
-    contextCell.value = buildContextCellValue(row.context, row.highlightedText);
-    contextCell.alignment = wrapAlignment;
-  }
+  rowXml.push(
+    `<row r="1">${headers
+      .map((header, idx) => inlineStringCell(`${toColumnName(idx + 1)}1`, header, 1))
+      .join("")}</row>`
+  );
 
-  const buffer = await workbook.xlsx.writeBuffer();
-  return new Blob([buffer], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  rows.forEach((row, index) => {
+    const r = index + 2;
+    const cells: string[] = [];
+    cells.push(inlineStringCell(`A${r}`, row.threadId));
+    cells.push(numberCell(`B${r}`, row.commentIndex));
+    cells.push(inlineStringCell(`C${r}`, row.author));
+    cells.push(inlineStringCell(`D${r}`, row.date));
+    cells.push(inlineStringCell(`E${r}`, row.comment, 2));
+    cells.push(inlineStringCell(`F${r}`, row.highlightedText, 2));
+    cells.push(richTextCell(`G${r}`, buildContextRuns(row.context, row.highlightedText), 2));
+    if (typeof row.charPos === "number") {
+      cells.push(numberCell(`H${r}`, row.charPos));
+    } else {
+      cells.push(inlineStringCell(`H${r}`, ""));
+    }
+    rowXml.push(`<row r="${r}">${cells.join("")}</row>`);
+  });
+
+  const colsXml = widths
+    .map((width, idx) => `<col min="${idx + 1}" max="${idx + 1}" width="${width}" customWidth="1"/>`)
+    .join("");
+
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <cols>${colsXml}</cols>
+  <sheetData>${rowXml.join("")}</sheetData>
+</worksheet>`;
+
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font>
+    <font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <borders count="1">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+  </cellXfs>
+  <cellStyles count="1">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+  </cellStyles>
+</styleSheet>`;
+
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Comments" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>`;
+
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`;
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`;
+
+  const zipData = zipSync(
+    {
+      "[Content_Types].xml": strToU8(contentTypesXml),
+      "_rels/.rels": strToU8(rootRelsXml),
+      "xl/workbook.xml": strToU8(workbookXml),
+      "xl/_rels/workbook.xml.rels": strToU8(workbookRelsXml),
+      "xl/styles.xml": strToU8(stylesXml),
+      "xl/worksheets/sheet1.xml": strToU8(sheetXml)
+    },
+    { level: 0 }
+  );
+
+  return new Blob([zipData], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   });
 }
 
 type ExtractResponse = {
   ok: boolean;
-  rows?: CommentRowWire[];
+  rows?: CommentRow[];
   editorFullText?: string;
   editorTextSource?: string;
   editorTextLen?: number;
@@ -203,7 +248,7 @@ function fetchCommentRows(
         return;
       }
       resolve({
-        rows: normalizeRows(response.rows ?? []),
+        rows: response.rows ?? [],
         errors: response.errors ?? [],
       });
     });
