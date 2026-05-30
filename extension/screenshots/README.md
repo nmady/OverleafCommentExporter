@@ -14,4 +14,3 @@ Recommended format:
 - At least 1280x800
 - Avoid personal/private document content
 
-These image files are ignored by git via the repository `.gitignore`.
