@@ -4,6 +4,9 @@ A Firefox add-on designed to streamline collaborative academic writing by easily
 
 Managing feedback across multi-author manuscripts can be a high-friction process. Developed within the **[Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research)** at **Aalto University**, this tool emerged from the practical need to simplify complex writing workflows in our own research on self-directed behavior. By reducing the administrative overhead of addressing co-author feedback, this extension allows researchers to focus more on their core science and less on software logistics. 
 
+## How to Use
+![Indicate whether you want CSV or XLSX format and download.](extension/screenshots/Screenshot 2026-05-29 at 11.49.58 AM.png)
+
 ## What’s Here
 
 - `extension/`: the Firefox-compatible browser extension.
@@ -62,3 +65,6 @@ This software is maintained by the [Autotelic Interaction Research Group](https:
 If you use this tool to assist in your academic writing or research workflow, please consider citing it:
 
 > Ady, Nadia M. (2026). *Overleaf Comment Extractor* (Version 0.1.0) [Browser Extension]. Aalto University / Helsinki Institute for Information Technology. 
+
+## License 
+This project is licensed under the MIT License - see the LICENSE file for details.
