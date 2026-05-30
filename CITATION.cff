@@ -1,0 +1,33 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: Overleaf Comment Extractor
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Nadia M.
+    family-names: Ady
+    email: nadia.ady@aalto.fi
+    affiliation: >-
+      Aalto University and Helsinki Institute for
+      Information Technology (HIIT)
+    orcid: 'https://orcid.org/0009-0003-3314-3008'
+repository-code: 'https://github.com/nmady/OverleafCommentExporter'
+repository-artifact: >-
+  https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/
+abstract: >-
+  Firefox extension to export Overleaf review comments to
+  CSV or XLSX with one click.
+keywords:
+  - Overleaf
+  - spreadsheet
+  - CSV
+  - XLSX
+  - export
+  - LaTeX
+  - comments
+license: MIT
+version: 0.1.0
