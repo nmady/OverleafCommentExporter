@@ -2,7 +2,7 @@
 
 A Firefox add-on designed to streamline collaborative academic writing by easily extracting and organizing comments from Overleaf projects. 
 
-Managing feedback across multi-author manuscripts can be a high-friction process. Developed within the **[Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research)** at **Aalto University**, this tool emerged from the practical need to simplify complex writing workflows in our own research on self-directed behavior. By reducing the administrative overhead of addressing co-author feedback, this extension allows researchers to focus more on their core science and less on software logistics. 
+Managing feedback across multi-author manuscripts can be a high-friction process. Developed within the **[Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research)** at **Aalto University**, this tool emerged from the practical need to simplify complex writing workflows in our own research on self-directed behavior. In Overleaf, the highlighted text referenced by a comment is often lost during edits, so it is helpful to be able to return to  a spreadsheet snapshot of the original highlights. We've also found that moving comments to a spreadsheet allows us to more easily organize the work to address them. By reducing the administrative overhead of addressing co-author feedback, this extension allows researchers to focus more on communicating their science and less on worrying about lost comments. 
 
 ## How to Use
 ![Indicate whether you want CSV or XLSX format and download.](https://github.com/nmady/OverleafCommentExporter/raw/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.49.58%E2%80%AFAM.png)
@@ -59,7 +59,7 @@ AMO submission checklist: `AMO_RELEASE_CHECKLIST.md`.
 - Privacy policy for AMO submission: `PRIVACY.md`.
 
 ## Acknowledgments & Funding
-This software is maintained by the [Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research) and its development is generously supported by the **Helsinki Institute for Information Technology (HIIT)**.
+This software is maintained by the [Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research) and its development is generously supported by the **[Helsinki Institute for Information Technology (HIIT)](https://www.hiit.fi/)**.
 
 ## Citation
 If you use this tool to assist in your academic writing or research workflow, please consider citing it:
