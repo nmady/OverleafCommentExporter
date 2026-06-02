@@ -10,7 +10,7 @@ Managing feedback across multi-author manuscripts can be a high-friction process
 
 ## How to Use
 
-The recommended way to install is to visit the [Firefox Add-ons Product Page](https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/) and click "Add to Firefox". From there, find the extension in your Extensions menu ![extensions icon](https://assets-prod.sumo.prod.webservices.mozgcp.net/media/uploads/gallery/images/2023-01-23-04-30-58-1c8799.png) to open the pop-up interface. Choose your desired output format to download.
+The recommended way to install is to visit the [Firefox Add-ons Product Page](https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/) and click "Add to Firefox". From there, navigate to your Overleaf document and open the review panel. Find the extension in your Firefox Extensions menu to open the pop-up interface. Choose your desired output format (CSV or XSLX) to download.
 
 ![Indicate whether you want CSV or XLSX format and download.](https://github.com/nmady/OverleafCommentExporter/raw/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.49.58%E2%80%AFAM.png)
 ![XLSX Output](https://github.com/nmady/OverleafCommentExporter/blob/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.52.26%E2%80%AFAM.png)
