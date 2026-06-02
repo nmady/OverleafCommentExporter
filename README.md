@@ -21,7 +21,6 @@ The recommended way to install is to visit the [Firefox Add-ons Product Page](ht
 ### What’s Here
 
 - `extension/`: the Firefox-compatible browser extension.
-- `samples/`: sample Overleaf exports and reference CSVs for comparison.
 
 ### Build From Source
 
