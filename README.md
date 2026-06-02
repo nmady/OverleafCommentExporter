@@ -1,6 +1,6 @@
 # Overleaf Comment Extractor
 
-https://doi.org/10.5281/zenodo.20513057
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20513057.svg)](https://doi.org/10.5281/zenodo.20513057)
 
 A Firefox add-on designed to streamline collaborative academic writing by easily extracting and organizing comments from Overleaf projects. 
 
