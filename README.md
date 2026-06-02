@@ -9,15 +9,21 @@ Firefox Add-ons Product Page: https://addons.mozilla.org/en-US/firefox/addon/ove
 Managing feedback across multi-author manuscripts can be a high-friction process. Developed within the **[Autotelic Interaction Research Group](https://www.aalto.fi/en/department-of-computer-science/autotelic-interaction-research)** at **Aalto University**, this tool emerged from the practical need to simplify complex writing workflows in our own research on self-directed behavior. In Overleaf, the highlighted text referenced by a comment is often lost during edits, so it is helpful to be able to return to  a spreadsheet snapshot of the original highlights. We've also found that moving comments to a spreadsheet allows us to more easily organize the work to address them. By reducing the administrative overhead of addressing co-author feedback, this extension allows researchers to focus more on communicating their science and less on worrying about lost comments. 
 
 ## How to Use
+
+The recommended way to install is to visit the [Firefox Add-ons Product Page](https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/) and click "Add to Firefox". From there, find the extension in your Extensions menu ![extensions icon](https://assets-prod.sumo.prod.webservices.mozgcp.net/media/uploads/gallery/images/2023-01-23-04-30-58-1c8799.png) to open the pop-up interface. Choose your desired output format to download.
+
 ![Indicate whether you want CSV or XLSX format and download.](https://github.com/nmady/OverleafCommentExporter/raw/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.49.58%E2%80%AFAM.png)
 ![XLSX Output](https://github.com/nmady/OverleafCommentExporter/blob/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.52.26%E2%80%AFAM.png)
 
-## What’s Here
+
+## Developer Notes 
+
+### What’s Here
 
 - `extension/`: the Firefox-compatible browser extension.
 - `samples/`: sample Overleaf exports and reference CSVs for comparison.
 
-## Build
+### Build From Source
 
 ```bash
 cd extension
@@ -25,7 +31,7 @@ npm install
 npm run build
 ```
 
-## Package For addons.mozilla.org (AMO)
+### Package For addons.mozilla.org (AMO)
 
 ```bash
 cd extension
@@ -44,20 +50,20 @@ npm run validate:release
 
 AMO submission checklist: `AMO_RELEASE_CHECKLIST.md`.
 
-## Load The Extension
+### Load The Extension
 
 1. Open Firefox and go to `about:debugging`.
 2. Choose This Firefox and click Load Temporary Add-on.
 3. Select `extension/manifest.json`.
 4. Reload Overleaf after the extension is loaded.
 
-## Export Flow
+### Export Flow
 
 1. Open an Overleaf project with review comments.
 2. Use the extension popup to start an export.
 3. Download the generated CSV and compare it with the reference files in `samples/` when needed.
 
-## Notes
+### Notes
 
 - Build artifacts in `extension/dist/` are generated and should not be edited by hand.
 - Generated CSV outputs are intentionally kept out of version control.
