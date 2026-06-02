@@ -1,5 +1,7 @@
 # Overleaf Comment Extractor
 
+https://doi.org/10.5281/zenodo.20513057
+
 A Firefox add-on designed to streamline collaborative academic writing by easily extracting and organizing comments from Overleaf projects. 
 
 Firefox Add-ons Product Page: https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/
@@ -66,7 +68,7 @@ This software is maintained by the **[Autotelic Interaction Research Group](http
 ## Citation
 If you use this tool to assist in your academic writing or research workflow, please consider citing it:
 
-> Ady, Nadia M. (2026). *Overleaf Comment Extractor* (Version 0.1.0) [Browser Extension]. Aalto University / Helsinki Institute for Information Technology. 
+> Ady, Nadia M. (2026). *Overleaf Comment Extractor* (Version 0.1.0) [Browser Extension]. Zenodo. doi:10.5281/zenodo.20513057 
 
 ## License 
 This project is licensed under the MIT License - see the LICENSE file for details.

@@ -15,6 +15,11 @@ authors:
       Aalto University and Helsinki Institute for
       Information Technology (HIIT)
     orcid: 'https://orcid.org/0009-0003-3314-3008'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.20513057
+  - type: swh
+    value: 'swh:1:dir:19408abe9a9fe1bc65e6122c9758c22aa95d920d'
 repository-code: 'https://github.com/nmady/OverleafCommentExporter'
 repository-artifact: >-
   https://addons.mozilla.org/en-US/firefox/addon/overleaf-comment-exporter/
