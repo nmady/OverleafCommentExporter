@@ -10,6 +10,7 @@ Managing feedback across multi-author manuscripts can be a high-friction process
 
 ## How to Use
 ![Indicate whether you want CSV or XLSX format and download.](https://github.com/nmady/OverleafCommentExporter/raw/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.49.58%E2%80%AFAM.png)
+![XLSX Output](https://github.com/nmady/OverleafCommentExporter/blob/main/extension/screenshots/Screenshot%202026-05-29%20at%2011.52.26%E2%80%AFAM.png)
 
 ## What’s Here
 
