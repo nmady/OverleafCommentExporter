@@ -3,7 +3,7 @@ import { strToU8, zipSync } from "fflate";
 
 const COLUMNS: Array<[keyof CommentRow, string]> = [
   ["threadId", "Thread ID"],
-  ["commentIndex", "Reply #"],
+  ["replyIndex", "Reply #"],
   ["author", "Author"],
   ["date", "Date"],
   ["comment", "Comment"],
@@ -35,6 +35,7 @@ function xmlEscape(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/** Converts a 1-based column index to Excel column letters: 1 -> A, 27 -> AA. */
 function toColumnName(index: number): string {
   let value = "";
   let n = index;
@@ -100,6 +101,10 @@ function numberCell(ref: string, value: number, styleIndex?: number): string {
   return `<c r="${ref}"${styleAttr}><v>${value}</v></c>`;
 }
 
+/**
+ * Builds a minimal OOXML workbook in memory and zips it as a valid XLSX file.
+ * This avoids heavy spreadsheet dependencies in the extension bundle.
+ */
 async function toXlsx(rows: CommentRow[]): Promise<Blob> {
   const headers = [
     "Thread ID",
@@ -111,6 +116,7 @@ async function toXlsx(rows: CommentRow[]): Promise<Blob> {
     "Context",
     "Char Position"
   ];
+  // Column widths tuned for readability of typical Overleaf comment exports.
   const widths = [18, 8, 20, 22, 45, 32, 48, 14];
 
   const rowXml: string[] = [];
@@ -125,7 +131,7 @@ async function toXlsx(rows: CommentRow[]): Promise<Blob> {
     const r = index + 2;
     const cells: string[] = [];
     cells.push(inlineStringCell(`A${r}`, row.threadId));
-    cells.push(numberCell(`B${r}`, row.commentIndex));
+    cells.push(numberCell(`B${r}`, row.replyIndex));
     cells.push(inlineStringCell(`C${r}`, row.author));
     cells.push(inlineStringCell(`D${r}`, row.date));
     cells.push(inlineStringCell(`E${r}`, row.comment, 2));

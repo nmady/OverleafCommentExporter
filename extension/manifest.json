@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Overleaf Comment Exporter",
   "version": "0.1.0",
-  "description": "Export Overleaf review comments as CSV.",
+  "description": "Export Overleaf review comments as CSV or XLSX.",
   "homepage_url": "https://github.com/nmady/OverleafCommentExporter",
   "permissions": ["activeTab"],
   "host_permissions": ["https://www.overleaf.com/*"],

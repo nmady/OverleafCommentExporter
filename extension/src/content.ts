@@ -271,6 +271,26 @@ function getDocFromPath(root: unknown, path: string[]): DocLike | null {
   return null;
 }
 
+/**
+ * Attempts known property paths used by different Overleaf/CodeMirror wrappers
+ * to reach a document-like object with `toString()`.
+ * 
+ * Purpose: the extractor needs the full editor text. 
+ *    Some pages expose it at state.doc.toString() but Overleaf/CodeMirror wrappers
+ *    put that doc at different places (e.g., editorEl.cmView.view.state.doc, 
+ *    editorEl.view.state.doc, rootView.state.doc, etc.).
+ * 
+ * What the function does: it first runs a small probe (findDocLike) that checks the 
+ *    obvious state.doc, then iterates a list of likely property-path arrays (const paths)
+ *    and tries to follow each path to a candidate doc. If it finds an object whose 
+ *    toString() is a function, it returns that object. Otherwise it returns null.
+ * 
+ * Why multiple paths: different CodeMirror versions, Overleaf internal wrappers, or 
+ *    custom element hosts expose the view/state/doc at different nesting levels — 
+ *    the hardcoded paths are heuristics collected from observed DOM/runtime shapes.
+ * 
+ * Maintenance note: if Overleaf or CodeMirror changes, the list may need updating.
+ */
 function findDocLikeWithKnownPaths(obj: unknown): DocLike | null {
   const direct = findDocLike(obj);
   if (direct) {
@@ -459,6 +479,12 @@ function parseLineNumber(raw: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/**
+ * Associates currently visible editor text lines with visible gutter line numbers.
+ *
+ * Matching is based on vertical proximity because text lines and gutter cells are
+ * rendered in separate DOM subtrees.
+ */
 function captureVisibleLinesWithNumbers(scroller: HTMLElement, acc: Map<number, string>): void {
   const lineEls = Array.from(scroller.querySelectorAll(".cm-content .cm-line"))
     .filter((el): el is HTMLElement => el instanceof HTMLElement);
@@ -506,6 +532,10 @@ function captureVisibleLinesWithNumbers(scroller: HTMLElement, acc: Map<number, 
   }
 }
 
+/**
+ * Scroll-harvests the editor to recover line text and comment-highlight candidates
+ * even when only a windowed subset is in the DOM.
+ */
 async function buildEditorLinesByScrollingDom(): Promise<EditorLines> {
   const scroller = document.querySelector(".cm-editor .cm-scroller") as HTMLElement | null;
   if (!scroller) {
@@ -710,6 +740,10 @@ type IndexedSpanText = {
   end: number;
 };
 
+/**
+ * Maps DOM span texts back into the full editor text using a forward-moving cursor.
+ * If the optimistic cursor search fails, it retries from document start.
+ */
 function indexSelectorTextsInFullText(fullText: string, selector: string): IndexedSpanText[] {
   const nodes = Array.from(document.querySelectorAll(selector));
   const indexed: IndexedSpanText[] = [];
@@ -797,6 +831,10 @@ function pickAnchoredSpanByLocalContext(fullText: string, dataPos: number, selec
   return resolved;
 }
 
+/**
+ * Reconstructs a likely contiguous highlight run anchored exactly at `dataPos`
+ * by chaining adjacent DOM-highlight fragments in DOM order.
+ */
 function pickAnchoredSpanChainAtPos(fullText: string, dataPos: number, selector: string): string {
   const localAnchor = getLocalDataPosInContext(fullText, dataPos, 1200);
   if (!localAnchor) {
@@ -1126,6 +1164,10 @@ function combineCandidateTextsWithOriginalGaps(
   return resolved;
 }
 
+/**
+ * Collects highlight candidates from multiple selector buckets and resolves
+ * the strongest UI-provided candidate at `dataPos` using a strict precedence.
+ */
 function getFocusedHighlightDetails(
   fullText: string,
   dataPos: number,
@@ -1655,6 +1697,10 @@ async function tryAlignToGutterLine(scroller: HTMLElement, targetLine: number): 
   return true;
 }
 
+/**
+ * Tries several scroll strategies to bring the target position line into view:
+ * CodeMirror dispatch, gutter alignment, ratio seek, delta seek, then step seek.
+ */
 async function scrollEditorToPos(pos: number, editorLines?: Array<[number, string]>): Promise<ScrollCheck> {
   if (pos < 0) {
     return {
@@ -1769,6 +1815,10 @@ async function scrollEditorToPos(pos: number, editorLines?: Array<[number, strin
   return buildScrollCheck(scroller, targetLine, "manual-target-line-not-found");
 }
 
+/**
+ * Returns the line containing `pos` and a context block bounded by nearest
+ * fully blank lines around that anchor (blank boundaries excluded).
+ */
 function getContextAtPos(editor: EditorLines, pos: number): [string, string] {
   const { lines, fullText } = editor;
   if (!lines.length || !fullText.length) {
@@ -2110,6 +2160,10 @@ function extendUiHighlightAcrossAdjacentCandidates(
   return resolved;
 }
 
+/**
+ * Final highlight resolver. Prefers high-confidence UI-derived matches and falls
+ * back to phrase/token extraction at position with explicit confidence labels.
+ */
 function resolveHighlightAtPos(fullText: string, dataPos: number, uiDetails: UiHighlightDetails): HighlightResolution {
   const uiHighlight = uiDetails.text;
   const phrase = getPhraseAtPos(fullText, dataPos, 10, 140);
@@ -2225,6 +2279,10 @@ function getReviewEntryKey(entry: Element): string {
   return `${threadId}|${dataPos}|${firstBody}`;
 }
 
+/**
+ * Executes extraction for one review entry, including interaction attempts,
+ * highlight resolution, context extraction, and row emission.
+ */
 async function processReviewEntry(params: {
   entry: Element;
   editor: EditorLines;
@@ -2333,7 +2391,7 @@ async function processReviewEntry(params: {
 
       rows.push({
         threadId,
-        commentIndex: index,
+        replyIndex: index,
         author: extractUser(commentEl),
         date: (commentEl.querySelector(".review-panel-entry-time")?.textContent ?? "").trim(),
         comment: body,
